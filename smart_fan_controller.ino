@@ -4,6 +4,7 @@
  * Features:
  * - Temperature-based PWM fan control
  * - Sound-reactive mode (reduces fan during speech)
+ * - Temperature override safety (disables quiet mode if temp > 95°F)
  * - OLED menu system for settings
  * - Rotary encoder navigation
  * - Persistent settings storage
@@ -49,6 +50,7 @@
 #define TEMP_60_PERCENT     35   // 95°F
 #define TEMP_75_PERCENT     40   // 105°F
 #define TEMP_100_PERCENT    46   // 115°F
+#define TEMP_OVERRIDE       35   // 95°F - disable quiet mode above this
 
 // Fan PWM settings
 #define FAN_PWM_FREQ        25000  // 25kHz PWM frequency
@@ -82,13 +84,15 @@ struct Settings {
   uint8_t temp_off_threshold;      // 85°F default
   uint8_t temp_max_threshold;      // 115°F default
   bool quiet_mode_enabled;         // Enable speech detection
+  bool temp_override_enabled;      // Enable temp override safety (bypass quiet mode if temp > 95F)
 };
 
 Settings settings = {
   .quiet_mode_sensitivity = 50,
   .temp_off_threshold = 29,
   .temp_max_threshold = 46,
-  .quiet_mode_enabled = true
+  .quiet_mode_enabled = true,
+  .temp_override_enabled = true
 };
 
 // Runtime state
@@ -97,6 +101,7 @@ struct SystemState {
   uint8_t current_fan_speed;  // 0-100%
   uint16_t current_sound_level;
   bool sound_detected;
+  bool temp_override_active;  // Is override currently active?
   unsigned long last_temp_read;
   unsigned long last_sound_check;
 };
@@ -106,6 +111,7 @@ SystemState system_state = {
   .current_fan_speed = 0,
   .current_sound_level = 0,
   .sound_detected = false,
+  .temp_override_active = false,
   .last_temp_read = 0,
   .last_sound_check = 0
 };
@@ -116,6 +122,7 @@ enum MenuMode {
   MENU_SETTINGS,
   MENU_QUIET_SENSITIVITY,
   MENU_TEMP_LIMITS,
+  MENU_TEMP_OVERRIDE,
   MENU_STATUS
 };
 
@@ -163,6 +170,7 @@ void load_settings();
 // Sensor reading
 void update_temperature();
 void update_sound_level();
+void update_override_status();
 float celsius_to_fahrenheit(float celsius);
 float fahrenheit_to_celsius(float fahrenheit);
 
@@ -179,6 +187,7 @@ void draw_main_menu();
 void draw_settings_menu();
 void draw_quiet_mode_menu();
 void draw_temp_limits_menu();
+void draw_temp_override_menu();
 void draw_status_screen();
 
 // Settings
@@ -275,13 +284,13 @@ void load_settings() {
   settings.temp_off_threshold = preferences.getUChar("temp_off", 29);
   settings.temp_max_threshold = preferences.getUChar("temp_max", 46);
   settings.quiet_mode_enabled = preferences.getBool("quiet_en", true);
+  settings.temp_override_enabled = preferences.getBool("temp_override", true);
   
   preferences.end();
   
-  debug_print("Settings loaded: quiet_sens=%d, temp_off=%d°C, temp_max=%d°C\n",
+  debug_print("Settings loaded: quiet_sens=%d, temp_override=%s\n",
               settings.quiet_mode_sensitivity,
-              settings.temp_off_threshold,
-              settings.temp_max_threshold);
+              settings.temp_override_enabled ? "ON" : "OFF");
 }
 
 // ============================================================================
@@ -294,6 +303,7 @@ void loop() {
   // Update temperature (every 500ms)
   if (now - system_state.last_temp_read >= 500) {
     update_temperature();
+    update_override_status();  // Check if override should be active
     system_state.last_temp_read = now;
   }
   
@@ -339,10 +349,26 @@ void update_temperature() {
   // Debug output every 2 seconds
   static unsigned long last_debug = 0;
   if (millis() - last_debug > 2000) {
-    debug_print("Temp: %.1f°C (%.1f°F)\n", 
+    debug_print("Temp: %.1f°C (%.1f°F), Override: %s\n", 
                 celsius, 
-                celsius_to_fahrenheit(celsius));
+                celsius_to_fahrenheit(celsius),
+                system_state.temp_override_active ? "ACTIVE" : "inactive");
     last_debug = millis();
+  }
+}
+
+void update_override_status() {
+  // Check if temperature exceeds override threshold (95°F / 35°C)
+  float temp_f = celsius_to_fahrenheit(system_state.current_temp);
+  
+  if (settings.temp_override_enabled) {
+    if (temp_f > 95.0) {
+      system_state.temp_override_active = true;
+    } else if (temp_f < 93.0) {  // Hysteresis: turn off at 93°F to prevent chatter
+      system_state.temp_override_active = false;
+    }
+  } else {
+    system_state.temp_override_active = false;
   }
 }
 
@@ -408,6 +434,11 @@ uint8_t calculate_fan_speed_from_temp() {
 }
 
 uint8_t apply_sound_dampening(uint8_t base_speed) {
+  // If temperature override is active, bypass quiet mode entirely
+  if (system_state.temp_override_active) {
+    return base_speed;  // Return full base speed without dampening
+  }
+  
   if (!settings.quiet_mode_enabled || !system_state.sound_detected) {
     return base_speed;  // No dampening
   }
@@ -496,6 +527,9 @@ void update_display() {
     case MENU_TEMP_LIMITS:
       draw_temp_limits_menu();
       break;
+    case MENU_TEMP_OVERRIDE:
+      draw_temp_override_menu();
+      break;
     case MENU_STATUS:
       draw_status_screen();
       break;
@@ -512,7 +546,7 @@ void draw_main_menu() {
     "Settings",
     "Status",
     "Quiet Mode",
-    "Temp Limits"
+    "Temp Override"
   };
   
   for (int i = 0; i < 4; i++) {
@@ -532,16 +566,11 @@ void draw_settings_menu() {
   display.print(settings.quiet_mode_sensitivity);
   display.println("%");
   
-  display.print("Temp Off: ");
-  display.print(settings.temp_off_threshold);
-  display.println("C");
-  
-  display.print("Temp Max: ");
-  display.print(settings.temp_max_threshold);
-  display.println("C");
-  
   display.print("Quiet Mode: ");
   display.println(settings.quiet_mode_enabled ? "ON" : "OFF");
+  
+  display.print("Temp Ovrd: ");
+  display.println(settings.temp_override_enabled ? "ON" : "OFF");
 }
 
 void draw_quiet_mode_menu() {
@@ -579,6 +608,27 @@ void draw_temp_limits_menu() {
   display.println("(Press to edit)");
 }
 
+void draw_temp_override_menu() {
+  display.println("=== Temp Override ===");
+  display.println();
+  display.print("Status: ");
+  display.println(settings.temp_override_enabled ? "ON" : "OFF");
+  
+  display.println();
+  display.println("When temp > 95F:");
+  display.println("- Quiet mode OFF");
+  display.println("- Fan runs at");
+  display.println("  full capacity");
+  
+  display.println();
+  display.print("Current: ");
+  if (system_state.temp_override_active) {
+    display.print("ACTIVE!");
+  } else {
+    display.print("Inactive");
+  }
+}
+
 void draw_status_screen() {
   display.println("=== Status ===");
   display.println();
@@ -599,8 +649,8 @@ void draw_status_screen() {
   display.print(system_state.sound_detected ? "ON" : "OFF");
   display.println("]");
   
-  display.print("Quiet: ");
-  display.println(settings.quiet_mode_enabled ? "ON" : "OFF");
+  display.print("Override: ");
+  display.println(system_state.temp_override_active ? "ACTIVE" : "Off");
 }
 
 // ============================================================================
@@ -616,6 +666,7 @@ void save_settings() {
   preferences.putUChar("temp_off", settings.temp_off_threshold);
   preferences.putUChar("temp_max", settings.temp_max_threshold);
   preferences.putBool("quiet_en", settings.quiet_mode_enabled);
+  preferences.putBool("temp_override", settings.temp_override_enabled);
   
   preferences.end();
   
