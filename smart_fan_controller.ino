@@ -53,7 +53,6 @@
 // Fan PWM settings
 #define FAN_PWM_FREQ        25000  // 25kHz PWM frequency
 #define FAN_PWM_RESOLUTION  8      // 8-bit (0-255)
-#define FAN_PWM_CHANNEL     0      // PWM channel
 
 // Sound sensor tuning
 #define SOUND_THRESHOLD     100   // ADC threshold for speech detection
@@ -259,12 +258,12 @@ void init_sensors() {
 void init_pwm() {
   debug_print("Initializing PWM...\n");
   
-  // Configure PWM on ESP32-C3
-  ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
-  ledcAttachPin(PIN_FAN_PWM, FAN_PWM_CHANNEL);
-  ledcWrite(FAN_PWM_CHANNEL, 0);  // Start at 0%
+  // Configure PWM on ESP32-C3 using new ledcAttach API
+  // ledcAttach(pin, frequency, resolution_bits)
+  ledcAttach(PIN_FAN_PWM, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
+  ledcWrite(PIN_FAN_PWM, 0);  // Start at 0%
   
-  debug_print("PWM configured: %d Hz, 8-bit resolution\n", FAN_PWM_FREQ);
+  debug_print("PWM configured: %d Hz, %d-bit resolution\n", FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
 }
 
 void load_settings() {
@@ -384,7 +383,7 @@ void set_fan_speed(uint8_t percentage) {
   
   // Convert percentage to 8-bit PWM value (0-255)
   uint8_t pwm_value = (percentage * 255) / 100;
-  ledcWrite(FAN_PWM_CHANNEL, pwm_value);
+  ledcWrite(PIN_FAN_PWM, pwm_value);
 }
 
 uint8_t calculate_fan_speed_from_temp() {
