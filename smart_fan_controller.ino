@@ -37,7 +37,7 @@
 #define PIN_ROTARY_CLK      4   // Rotary encoder clock
 #define PIN_ROTARY_DT       5   // Rotary encoder data
 #define PIN_ROTARY_SW       6   // Rotary encoder switch
-#define PIN_FAN_PWM         10  // PWM output to TL-C14 fan
+#define PIN_FAN_PWM         1   // PWM output to TL-C14 fan (CHANGED FROM 10)
 #define PIN_TEMP_SENSOR     7   // DS18B20 one-wire pin
 #define PIN_SOUND_SENSOR    0   // GY-MAX9814 analog input (ADC0)
 #define PIN_SDA             20  // I2C SDA for OLED
@@ -60,7 +60,7 @@
 
 // Fan PWM settings
 #define FAN_PWM_FREQ        25000  // 25kHz PWM frequency
-#define FAN_PWM_CHANNEL     8      // LEDC channel 8
+#define FAN_PWM_CHANNEL     1      // LEDC channel 1 (CHANGED FROM 8)
 #define FAN_PWM_RESOLUTION  8      // 8-bit (0-255)
 
 // Sound sensor tuning
