@@ -1,13 +1,13 @@
 /*
- * PWM TEST - Try different channels
+ * PWM TEST - GPIO 1
  * 
- * Test if PWM works on GPIO 10 with different LEDC channels
+ * Test if PWM works on GPIO 1 with LEDC channel 1
  */
 
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 
-#define PIN_FAN_PWM         10
+#define PIN_FAN_PWM         1
 #define PIN_SDA             20
 #define PIN_SCL             21
 
@@ -26,17 +26,17 @@ void setup() {
     while (1);
   }
   
-  // Try LEDC channel 0 instead
-  ledcSetup(0, 25000, 8);  // Channel 0, 25kHz, 8-bit
-  ledcAttachPin(PIN_FAN_PWM, 0);
-  ledcWrite(0, 0);
+  // Setup PWM on GPIO 1, channel 1
+  ledcSetup(1, 25000, 8);  // Channel 1, 25kHz, 8-bit
+  ledcAttachPin(PIN_FAN_PWM, 1);
+  ledcWrite(1, 0);
   
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   display.setCursor(0, 0);
-  display.println("PWM TEST - Channel 0");
-  display.println("GPIO 10");
+  display.println("PWM TEST - GPIO 1");
+  display.println("Channel 1");
   display.println();
   display.println("Rotating encoder...");
   display.display();
@@ -58,7 +58,7 @@ void loop() {
       } else {
         if (current_pwm > 0) current_pwm -= 10;
       }
-      ledcWrite(0, current_pwm);
+      ledcWrite(1, current_pwm);
     }
   }
   
