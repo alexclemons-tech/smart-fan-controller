@@ -1,7 +1,7 @@
 /*
- * PWM FAN TEST
+ * PWM TEST - Try different channels
  * 
- * Test if the fan PWM control is actually working
+ * Test if PWM works on GPIO 10 with different LEDC channels
  */
 
 #include <Wire.h>
@@ -15,10 +15,6 @@
 #define SCREEN_HEIGHT       64
 #define OLED_I2C_ADDRESS    0x3C
 
-#define FAN_PWM_FREQ        25000
-#define FAN_PWM_CHANNEL     8
-#define FAN_PWM_RESOLUTION  8
-
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 uint8_t current_pwm = 0;
@@ -30,20 +26,19 @@ void setup() {
     while (1);
   }
   
-  // Setup PWM
-  ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
-  ledcAttachPin(PIN_FAN_PWM, FAN_PWM_CHANNEL);
-  ledcWrite(FAN_PWM_CHANNEL, 0);
+  // Try LEDC channel 0 instead
+  ledcSetup(0, 25000, 8);  // Channel 0, 25kHz, 8-bit
+  ledcAttachPin(PIN_FAN_PWM, 0);
+  ledcWrite(0, 0);
   
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   display.setCursor(0, 0);
-  display.println("PWM FAN TEST");
-  display.println("GPIO 10 (Channel 8)");
+  display.println("PWM TEST - Channel 0");
+  display.println("GPIO 10");
   display.println();
-  display.println("Rotating encoder");
-  display.println("to change PWM...");
+  display.println("Rotating encoder...");
   display.display();
   
   delay(2000);
@@ -51,10 +46,9 @@ void setup() {
 
 void loop() {
   static int last_clk = 1;
-  int current_clk = digitalRead(4);  // CLK on GPIO 4
-  int current_dt = digitalRead(5);   // DT on GPIO 5
+  int current_clk = digitalRead(4);
+  int current_dt = digitalRead(5);
   
-  // Detect encoder rotation
   if (current_clk != last_clk) {
     last_clk = current_clk;
     
@@ -64,11 +58,10 @@ void loop() {
       } else {
         if (current_pwm > 0) current_pwm -= 10;
       }
-      ledcWrite(FAN_PWM_CHANNEL, current_pwm);
+      ledcWrite(0, current_pwm);
     }
   }
   
-  // Display current PWM value
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(0, 0);
@@ -78,7 +71,7 @@ void loop() {
   
   display.setTextSize(1);
   display.setCursor(0, 30);
-  display.print("Percentage: ");
+  display.print("Percent: ");
   display.print((current_pwm * 100) / 255);
   display.println("%");
   
@@ -86,9 +79,9 @@ void loop() {
   if (current_pwm == 0) {
     display.println("Fan should be OFF");
   } else if (current_pwm < 100) {
-    display.println("Fan should be LOW");
+    display.println("Fan should be SLOW");
   } else {
-    display.println("Fan should be HIGH");
+    display.println("Fan should be FAST");
   }
   
   display.display();
