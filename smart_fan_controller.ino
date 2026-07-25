@@ -67,6 +67,10 @@
 #define SCREEN_HEIGHT       64
 #define OLED_I2C_ADDRESS    0x3C
 
+// Menu interaction timeouts
+#define MENU_TIMEOUT        10000 // 10 seconds of inactivity returns to status
+#define ENCODER_ACCELERATION 300  // ms for acceleration threshold
+
 // ============================================================================
 // GLOBAL OBJECTS
 // ============================================================================
@@ -130,15 +134,19 @@ enum MenuMode {
 struct MenuState {
   MenuMode current_menu;
   uint8_t selected_option;
+  uint8_t edit_value;  // Temporary value for editing
   bool in_edit_mode;
   unsigned long last_interaction;
+  int last_encoder_value;
 };
 
 MenuState menu_state = {
-  .current_menu = MENU_MAIN,
+  .current_menu = MENU_STATUS,  // Start with status screen
   .selected_option = 0,
+  .edit_value = 0,
   .in_edit_mode = false,
-  .last_interaction = 0
+  .last_interaction = 0,
+  .last_encoder_value = 0
 };
 
 // Rotary encoder state
@@ -183,6 +191,7 @@ uint8_t apply_sound_dampening(uint8_t base_speed);
 // Menu & UI
 void handle_rotary_encoder();
 void handle_button_press();
+void handle_menu_navigation();
 void update_display();
 void draw_main_menu();
 void draw_settings_menu();
@@ -213,6 +222,8 @@ void setup() {
   init_pwm();
   load_settings();
   
+  menu_state.last_interaction = millis();
+  
   debug_print("Setup complete!\n");
 }
 
@@ -223,12 +234,6 @@ void init_pins() {
   pinMode(PIN_ROTARY_CLK, INPUT_PULLUP);
   pinMode(PIN_ROTARY_DT, INPUT_PULLUP);
   pinMode(PIN_ROTARY_SW, INPUT_PULLUP);
-  
-  // Sound sensor (analog, no need to set)
-  
-  // Temperature sensor (one-wire, handled by library)
-  
-  // Fan PWM will be handled by PWM initialization
   
   rotary_state.last_clk_state = digitalRead(PIN_ROTARY_CLK);
 }
@@ -274,7 +279,6 @@ void init_pwm() {
   debug_print("Initializing PWM...\n");
   
   // Configure PWM on ESP32-C3 using new ledcAttach API
-  // ledcAttach(pin, frequency, resolution_bits)
   ledcAttach(PIN_FAN_PWM, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
   ledcWrite(PIN_FAN_PWM, 0);  // Start at 0%
   
@@ -309,7 +313,7 @@ void loop() {
   // Update temperature (every 500ms)
   if (now - system_state.last_temp_read >= 500) {
     update_temperature();
-    update_override_status();  // Check if override should be active
+    update_override_status();
     system_state.last_temp_read = now;
   }
   
@@ -328,11 +332,12 @@ void loop() {
   // Handle user input
   handle_rotary_encoder();
   handle_button_press();
+  handle_menu_navigation();
   
   // Update display
   update_display();
   
-  delay(10);  // Small delay to prevent overwhelming the loop
+  delay(10);
 }
 
 // ============================================================================
@@ -343,7 +348,6 @@ void update_temperature() {
   tempSensor.requestTemperatures();
   float celsius = tempSensor.getTempCByIndex(0);
   
-  // Check for sensor error
   if (celsius == DEVICE_DISCONNECTED_C) {
     debug_print("ERROR: Temperature sensor disconnected!\n");
     system_state.current_temp = 0;
@@ -352,25 +356,24 @@ void update_temperature() {
   
   system_state.current_temp = celsius;
   
-  // Debug output every 2 seconds
   static unsigned long last_debug = 0;
   if (millis() - last_debug > 2000) {
-    debug_print("Temp: %.1f°C (%.1f°F), Override: %s\n", 
+    debug_print("Temp: %.1f°C (%.1f°F), Fan: %d%%, Override: %s\n", 
                 celsius, 
                 celsius_to_fahrenheit(celsius),
+                system_state.current_fan_speed,
                 system_state.temp_override_active ? "ACTIVE" : "inactive");
     last_debug = millis();
   }
 }
 
 void update_override_status() {
-  // Check if temperature exceeds override threshold (95°F / 35°C)
   float temp_f = celsius_to_fahrenheit(system_state.current_temp);
   
   if (settings.temp_override_enabled) {
     if (temp_f > 95.0) {
       system_state.temp_override_active = true;
-    } else if (temp_f < 93.0) {  // Hysteresis: turn off at 93°F to prevent chatter
+    } else if (temp_f < 93.0) {
       system_state.temp_override_active = false;
     }
   } else {
@@ -382,12 +385,10 @@ void update_sound_level() {
   static uint16_t sound_samples[SOUND_AVERAGING];
   static uint8_t sample_index = 0;
   
-  // Read analog value from sound sensor
   uint16_t raw_reading = analogRead(PIN_SOUND_SENSOR);
   sound_samples[sample_index] = raw_reading;
   sample_index = (sample_index + 1) % SOUND_AVERAGING;
   
-  // Calculate average
   uint32_t sum = 0;
   for (int i = 0; i < SOUND_AVERAGING; i++) {
     sum += sound_samples[i];
@@ -413,7 +414,6 @@ float fahrenheit_to_celsius(float fahrenheit) {
 void set_fan_speed(uint8_t percentage) {
   if (percentage > 100) percentage = 100;
   
-  // Convert percentage to 8-bit PWM value (0-255)
   uint8_t pwm_value = (percentage * 255) / 100;
   ledcWrite(PIN_FAN_PWM, pwm_value);
 }
@@ -422,37 +422,29 @@ uint8_t calculate_fan_speed_from_temp() {
   float temp_c = system_state.current_temp;
   float temp_f = celsius_to_fahrenheit(temp_c);
   
-  // Temperature curve mapping
   if (temp_f < 85) {
-    return 0;  // Fan off
+    return 0;
   } else if (temp_f < 95) {
-    // Linear interpolation: 25% at 85°F to 60% at 95°F
     return 25 + ((temp_f - 85) / 10) * 35;
   } else if (temp_f < 105) {
-    // Linear interpolation: 60% at 95°F to 75% at 105°F
     return 60 + ((temp_f - 95) / 10) * 15;
   } else if (temp_f < 115) {
-    // Linear interpolation: 75% at 105°F to 100% at 115°F
     return 75 + ((temp_f - 105) / 10) * 25;
   } else {
-    return 100;  // Max speed
+    return 100;
   }
 }
 
 uint8_t apply_sound_dampening(uint8_t base_speed) {
-  // If temperature override is active, bypass quiet mode entirely
   if (system_state.temp_override_active) {
-    return base_speed;  // Return full base speed without dampening
+    return base_speed;
   }
   
   if (!settings.quiet_mode_enabled || !system_state.sound_detected) {
-    return base_speed;  // No dampening
+    return base_speed;
   }
   
-  // If sound detected, reduce to configured quiet mode level
   uint8_t quiet_speed = (settings.quiet_mode_sensitivity * base_speed) / 100;
-  
-  // Ensure we don't go below 20% in quiet mode
   uint8_t min_quiet_speed = 20;
   return (quiet_speed < min_quiet_speed) ? min_quiet_speed : quiet_speed;
 }
@@ -462,27 +454,22 @@ uint8_t apply_sound_dampening(uint8_t base_speed) {
 // ============================================================================
 
 void handle_rotary_encoder() {
-  // Read current state with debounce
   static unsigned long last_read_time = 0;
   if (millis() - last_read_time < 5) return;
   last_read_time = millis();
   
   int current_clk = digitalRead(PIN_ROTARY_CLK);
   
-  // Detect rotation
   if (current_clk != rotary_state.last_clk_state) {
     rotary_state.last_clk_state = current_clk;
     
     if (current_clk == LOW) {
-      // Determine direction
       int dt_state = digitalRead(PIN_ROTARY_DT);
       
       if (dt_state == HIGH) {
         rotary_state.encoder_value++;
-        debug_print("Encoder: CW\n");
       } else {
         rotary_state.encoder_value--;
-        debug_print("Encoder: CCW\n");
       }
     }
   }
@@ -495,18 +482,89 @@ void handle_button_press() {
   int button_state = digitalRead(PIN_ROTARY_SW);
   
   if (button_state == LOW && !button_was_pressed) {
-    // Button just pressed
     unsigned long now = millis();
-    if (now - last_press_time > 50) {  // Debounce
-      debug_print("Button pressed\n");
+    if (now - last_press_time > 50) {
       button_was_pressed = true;
       last_press_time = now;
+      menu_state.last_interaction = now;
       
       // Handle button press based on menu state
-      // (Implementation in next section)
+      if (menu_state.current_menu == MENU_STATUS) {
+        // Enter main menu from status
+        menu_state.current_menu = MENU_MAIN;
+        menu_state.selected_option = 0;
+      } else if (menu_state.current_menu == MENU_MAIN) {
+        // Select menu item
+        switch (menu_state.selected_option) {
+          case 0:
+            menu_state.current_menu = MENU_SETTINGS;
+            break;
+          case 1:
+            menu_state.current_menu = MENU_STATUS;
+            break;
+          case 2:
+            menu_state.current_menu = MENU_QUIET_SENSITIVITY;
+            menu_state.edit_value = settings.quiet_mode_sensitivity;
+            break;
+          case 3:
+            menu_state.current_menu = MENU_TEMP_OVERRIDE;
+            break;
+        }
+      } else if (menu_state.current_menu == MENU_SETTINGS) {
+        // Return to main menu
+        menu_state.current_menu = MENU_MAIN;
+      } else if (menu_state.current_menu == MENU_QUIET_SENSITIVITY) {
+        // Save and return
+        settings.quiet_mode_sensitivity = menu_state.edit_value;
+        save_settings();
+        menu_state.current_menu = MENU_MAIN;
+      } else if (menu_state.current_menu == MENU_TEMP_OVERRIDE) {
+        // Toggle temp override
+        settings.temp_override_enabled = !settings.temp_override_enabled;
+        save_settings();
+        menu_state.current_menu = MENU_MAIN;
+      } else if (menu_state.current_menu == MENU_TEMP_LIMITS) {
+        // Return to main menu
+        menu_state.current_menu = MENU_MAIN;
+      }
     }
   } else if (button_state == HIGH) {
     button_was_pressed = false;
+  }
+}
+
+void handle_menu_navigation() {
+  // Check for timeout - return to status
+  if (menu_state.current_menu != MENU_STATUS) {
+    if (millis() - menu_state.last_interaction > MENU_TIMEOUT) {
+      menu_state.current_menu = MENU_STATUS;
+      rotary_state.encoder_value = menu_state.last_encoder_value;  // Reset encoder
+      return;
+    }
+  }
+  
+  // Process encoder movement
+  int encoder_delta = rotary_state.encoder_value - menu_state.last_encoder_value;
+  
+  if (encoder_delta != 0) {
+    menu_state.last_encoder_value = rotary_state.encoder_value;
+    menu_state.last_interaction = millis();
+    
+    if (menu_state.current_menu == MENU_MAIN) {
+      // Navigate main menu (4 items)
+      menu_state.selected_option += encoder_delta;
+      if (menu_state.selected_option < 0) menu_state.selected_option = 3;
+      if (menu_state.selected_option > 3) menu_state.selected_option = 0;
+      
+    } else if (menu_state.current_menu == MENU_QUIET_SENSITIVITY) {
+      // Adjust quiet mode sensitivity (0-100)
+      menu_state.edit_value += encoder_delta * 5;
+      if (menu_state.edit_value < 0) menu_state.edit_value = 0;
+      if (menu_state.edit_value > 100) menu_state.edit_value = 100;
+      
+    } else if (menu_state.current_menu == MENU_SETTINGS) {
+      // Settings display is read-only
+    }
   }
 }
 
@@ -568,34 +626,39 @@ void draw_main_menu() {
 void draw_settings_menu() {
   display.println("=== Settings ===");
   display.println();
-  display.print("Quiet Sens: ");
+  display.print("Quiet: ");
   display.print(settings.quiet_mode_sensitivity);
   display.println("%");
   
-  display.print("Quiet Mode: ");
+  display.print("Q.Mode: ");
   display.println(settings.quiet_mode_enabled ? "ON" : "OFF");
   
-  display.print("Temp Ovrd: ");
+  display.print("TempOvrd: ");
   display.println(settings.temp_override_enabled ? "ON" : "OFF");
+  
+  display.println();
+  display.println("[Press to go back]");
 }
 
 void draw_quiet_mode_menu() {
   display.println("=== Quiet Mode ===");
   display.println();
   display.print("Sensitivity: ");
-  display.print(settings.quiet_mode_sensitivity);
+  display.print(menu_state.edit_value);
   display.println("%");
   
-  display.println("(Use knob to adjust)");
+  display.println("(Knob to adjust)");
   display.println();
   
-  // Draw a simple bar graph
-  uint8_t bar_length = (settings.quiet_mode_sensitivity / 5);  // 0-20 chars
+  uint8_t bar_length = (menu_state.edit_value / 5);
   display.print("[");
   for (int i = 0; i < 20; i++) {
     display.print(i < bar_length ? "*" : "-");
   }
   display.println("]");
+  
+  display.println();
+  display.println("[Press to save]");
 }
 
 void draw_temp_limits_menu() {
@@ -604,14 +667,14 @@ void draw_temp_limits_menu() {
   
   display.print("Temp Off: ");
   display.print(settings.temp_off_threshold);
-  display.println("C (85F)");
+  display.println("C");
   
   display.print("Temp Max: ");
   display.print(settings.temp_max_threshold);
-  display.println("C (115F)");
+  display.println("C");
   
   display.println();
-  display.println("(Press to edit)");
+  display.println("[Press to go back]");
 }
 
 void draw_temp_override_menu() {
@@ -623,16 +686,17 @@ void draw_temp_override_menu() {
   display.println();
   display.println("When temp > 95F:");
   display.println("- Quiet mode OFF");
-  display.println("- Fan runs at");
-  display.println("  full capacity");
+  display.println("- Fan full power");
   
   display.println();
   display.print("Current: ");
   if (system_state.temp_override_active) {
-    display.print("ACTIVE!");
+    display.println("ACTIVE!");
   } else {
-    display.print("Inactive");
+    display.println("Inactive");
   }
+  
+  display.println("[Press to toggle]");
 }
 
 void draw_status_screen() {
@@ -651,12 +715,15 @@ void draw_status_screen() {
   
   display.print("Sound: ");
   display.print(system_state.current_sound_level);
-  display.print(" [");
+  display.print("[");
   display.print(system_state.sound_detected ? "ON" : "OFF");
   display.println("]");
   
   display.print("Override: ");
   display.println(system_state.temp_override_active ? "ACTIVE" : "Off");
+  
+  display.println();
+  display.println("[Press for menu]");
 }
 
 // ============================================================================
