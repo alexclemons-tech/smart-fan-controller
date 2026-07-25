@@ -62,6 +62,7 @@
 
 // Fan PWM settings
 #define FAN_PWM_FREQ        25000  // 25kHz PWM frequency
+#define FAN_PWM_CHANNEL     0      // LEDC channel 0
 #define FAN_PWM_RESOLUTION  8      // 8-bit (0-255)
 
 // Sound sensor tuning
@@ -328,8 +329,16 @@ void init_sensors() {
 void init_pwm() {
   debug_print("Initializing PWM...\n");
   
-  ledcAttach(PIN_FAN_PWM, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
-  ledcWrite(PIN_FAN_PWM, 0);
+  // Configure LEDC (PWM) - compatible with older ESP32 boards
+  // ledcSetup(channel, frequency, resolution)
+  ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
+  
+  // Attach pin to channel
+  // ledcAttachPin(pin, channel)
+  ledcAttachPin(PIN_FAN_PWM, FAN_PWM_CHANNEL);
+  
+  // Set initial value to 0
+  ledcWrite(FAN_PWM_CHANNEL, 0);
   
   debug_print("PWM configured: %d Hz, %d-bit resolution on GPIO %d\n", FAN_PWM_FREQ, FAN_PWM_RESOLUTION, PIN_FAN_PWM);
 }
@@ -490,7 +499,7 @@ void set_fan_speed(FanSpeed speed) {
   }
   
   uint8_t pwm_value = (pwm_percentage * 255) / 100;
-  ledcWrite(PIN_FAN_PWM, pwm_value);
+  ledcWrite(FAN_PWM_CHANNEL, pwm_value);
 }
 
 FanSpeed calculate_fan_speed_from_temp() {
