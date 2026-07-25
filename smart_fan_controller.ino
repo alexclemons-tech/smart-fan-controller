@@ -2,7 +2,7 @@
  * Smart Fan Controller for ESP32-C3 Super Mini
  * 
  * Features:
- * - Temperature-based PWM fan control
+ * - Temperature-based fan control (OFF / LOW / HIGH)
  * - Sound-reactive mode (reduces fan during speech)
  * - Temperature override safety (disables quiet mode if temp > 95°F)
  * - OLED menu system for settings
@@ -50,12 +50,15 @@
 // ============================================================================
 
 // Temperature thresholds (in Celsius - convert from Fahrenheit)
-#define TEMP_OFF            29   // 85°F - fan off below this
-#define TEMP_25_PERCENT     29   // 85°F - start of curve
-#define TEMP_60_PERCENT     35   // 95°F
-#define TEMP_75_PERCENT     40   // 105°F
-#define TEMP_100_PERCENT    46   // 115°F
+#define TEMP_OFF            29   // 85°F - fan OFF below this
+#define TEMP_LOW            32   // 90°F - fan LOW from 85-90°F
+#define TEMP_HIGH           35   // 95°F - fan HIGH above 95°F
 #define TEMP_OVERRIDE       35   // 95°F - disable quiet mode above this
+
+// Fan speed levels (PWM percentages)
+#define FAN_SPEED_OFF       0    // 0%
+#define FAN_SPEED_LOW       40   // 40%
+#define FAN_SPEED_HIGH      100  // 100%
 
 // Fan PWM settings
 #define FAN_PWM_FREQ        25000  // 25kHz PWM frequency
@@ -79,6 +82,9 @@
 // Watchdog timer
 #define WATCHDOG_TIMEOUT    60    // 60 seconds - auto-reset if hung
 
+// Encoder debugging
+#define DEBUG_ENCODER       true  // Set to false to disable encoder debug output
+
 // ============================================================================
 // GLOBAL OBJECTS
 // ============================================================================
@@ -94,36 +100,39 @@ Preferences preferences;
 
 struct Settings {
   uint8_t quiet_mode_sensitivity;  // 0-100%, default 50%
-  uint8_t temp_off_threshold;      // 85°F default
-  uint8_t temp_max_threshold;      // 115°F default
   bool quiet_mode_enabled;         // Enable speech detection
   bool temp_override_enabled;      // Enable temp override safety (bypass quiet mode if temp > 95F)
 };
 
 Settings settings = {
   .quiet_mode_sensitivity = 50,
-  .temp_off_threshold = 29,
-  .temp_max_threshold = 46,
   .quiet_mode_enabled = true,
   .temp_override_enabled = true
+};
+
+// Fan speed enum
+enum FanSpeed {
+  FAN_OFF = 0,
+  FAN_LOW = 1,
+  FAN_HIGH = 2
 };
 
 // Runtime state
 struct SystemState {
   float current_temp;
-  uint8_t current_fan_speed;  // 0-100%
+  FanSpeed current_fan_speed;  // OFF, LOW, or HIGH
   uint16_t current_sound_level;
   bool sound_detected;
-  bool temp_override_active;  // Is override currently active?
-  bool screen_on;             // Is OLED display currently on?
+  bool temp_override_active;   // Is override currently active?
+  bool screen_on;              // Is OLED display currently on?
   unsigned long last_temp_read;
   unsigned long last_sound_check;
-  unsigned long boot_time;    // Timestamp of when system started
+  unsigned long boot_time;     // Timestamp of when system started
 };
 
 SystemState system_state = {
   .current_temp = 0,
-  .current_fan_speed = 0,
+  .current_fan_speed = FAN_OFF,
   .current_sound_level = 0,
   .sound_detected = false,
   .temp_override_active = false,
@@ -138,7 +147,6 @@ enum MenuMode {
   MENU_MAIN,
   MENU_SETTINGS,
   MENU_QUIET_SENSITIVITY,
-  MENU_TEMP_LIMITS,
   MENU_TEMP_OVERRIDE,
   MENU_STATUS
 };
@@ -166,14 +174,20 @@ MenuState menu_state = {
 // Rotary encoder state
 struct RotaryState {
   int last_clk_state;
+  int current_clk_state;
+  int last_dt_state;
   int encoder_value;
   unsigned long last_rotate_time;
+  unsigned long last_debug_time;
 };
 
 RotaryState rotary_state = {
   .last_clk_state = 0,
+  .current_clk_state = 0,
+  .last_dt_state = 0,
   .encoder_value = 0,
-  .last_rotate_time = 0
+  .last_rotate_time = 0,
+  .last_debug_time = 0
 };
 
 // ============================================================================
@@ -199,9 +213,10 @@ float celsius_to_fahrenheit(float celsius);
 float fahrenheit_to_celsius(float fahrenheit);
 
 // Fan control
-void set_fan_speed(uint8_t percentage);
-uint8_t calculate_fan_speed_from_temp();
-uint8_t apply_sound_dampening(uint8_t base_speed);
+void set_fan_speed(FanSpeed speed);
+FanSpeed calculate_fan_speed_from_temp();
+FanSpeed apply_sound_dampening(FanSpeed base_speed);
+const char* fan_speed_to_string(FanSpeed speed);
 
 // Display control
 void screen_on_event();
@@ -213,11 +228,11 @@ void display_wake();
 void handle_rotary_encoder();
 void handle_button_press();
 void handle_menu_navigation();
+void debug_encoder_state();
 void update_display();
 void draw_main_menu();
 void draw_settings_menu();
 void draw_quiet_mode_menu();
-void draw_temp_limits_menu();
 void draw_temp_override_menu();
 void draw_status_screen();
 
@@ -239,6 +254,10 @@ void setup() {
   delay(1000);
   
   debug_print("\n\n=== Smart Fan Controller Starting ===\n");
+  debug_print("Pin Configuration:\n");
+  debug_print("  CLK: GPIO %d\n", PIN_ROTARY_CLK);
+  debug_print("  DT:  GPIO %d\n", PIN_ROTARY_DT);
+  debug_print("  SW:  GPIO %d\n", PIN_ROTARY_SW);
   
   system_state.boot_time = millis();
   
@@ -252,7 +271,12 @@ void setup() {
   menu_state.last_interaction = millis();
   menu_state.last_screen_activity = millis();
   
-  debug_print("Setup complete! Watchdog enabled for 24/7 reliability.\n");
+  // Read initial encoder state
+  rotary_state.last_clk_state = digitalRead(PIN_ROTARY_CLK);
+  rotary_state.last_dt_state = digitalRead(PIN_ROTARY_DT);
+  
+  debug_print("Setup complete! System ready for operation.\n");
+  debug_print("Encoder debugging: %s\n", DEBUG_ENCODER ? "ENABLED" : "DISABLED");
 }
 
 void init_pins() {
@@ -262,7 +286,9 @@ void init_pins() {
   pinMode(PIN_ROTARY_DT, INPUT_PULLUP);
   pinMode(PIN_ROTARY_SW, INPUT_PULLUP);
   
-  rotary_state.last_clk_state = digitalRead(PIN_ROTARY_CLK);
+  debug_print("  CLK state: %d\n", digitalRead(PIN_ROTARY_CLK));
+  debug_print("  DT state:  %d\n", digitalRead(PIN_ROTARY_DT));
+  debug_print("  SW state:  %d\n", digitalRead(PIN_ROTARY_SW));
 }
 
 void init_display() {
@@ -311,11 +337,10 @@ void init_pwm() {
 void init_watchdog() {
   debug_print("Initializing watchdog timer (%d seconds)...\n", WATCHDOG_TIMEOUT);
   
-  // Configure watchdog: 60 second timeout, panics if not fed
   esp_task_wdt_init(WATCHDOG_TIMEOUT, true);
-  esp_task_wdt_add(NULL);  // Subscribe current task
+  esp_task_wdt_add(NULL);
   
-  debug_print("Watchdog enabled. Must call feed_watchdog() every %d seconds.\n", WATCHDOG_TIMEOUT);
+  debug_print("Watchdog enabled. System will auto-reset if unresponsive.\n");
 }
 
 void load_settings() {
@@ -324,8 +349,6 @@ void load_settings() {
   preferences.begin("fan_controller", false);
   
   settings.quiet_mode_sensitivity = preferences.getUChar("quiet_sens", 50);
-  settings.temp_off_threshold = preferences.getUChar("temp_off", 29);
-  settings.temp_max_threshold = preferences.getUChar("temp_max", 46);
   settings.quiet_mode_enabled = preferences.getBool("quiet_en", true);
   settings.temp_override_enabled = preferences.getBool("temp_override", true);
   
@@ -343,7 +366,6 @@ void load_settings() {
 void loop() {
   unsigned long now = millis();
   
-  // Feed watchdog regularly (prevents auto-reset)
   feed_watchdog();
   
   // Update temperature (every 500ms)
@@ -360,8 +382,8 @@ void loop() {
   }
   
   // Calculate and apply fan speed
-  uint8_t base_speed = calculate_fan_speed_from_temp();
-  uint8_t final_speed = apply_sound_dampening(base_speed);
+  FanSpeed base_speed = calculate_fan_speed_from_temp();
+  FanSpeed final_speed = apply_sound_dampening(base_speed);
   set_fan_speed(final_speed);
   system_state.current_fan_speed = final_speed;
   
@@ -399,11 +421,11 @@ void update_temperature() {
   
   static unsigned long last_debug = 0;
   if (millis() - last_debug > 5000) {
-    debug_print("Temp: %.1f°C (%.1f°F), Fan: %d%%, Uptime: %ld sec\n", 
+    debug_print("Temp: %.1f°C (%.1f°F), Fan: %s, Override: %s\n", 
                 celsius, 
                 celsius_to_fahrenheit(celsius),
-                system_state.current_fan_speed,
-                get_uptime_seconds());
+                fan_speed_to_string(system_state.current_fan_speed),
+                system_state.temp_override_active ? "ACTIVE" : "off");
     last_debug = millis();
   }
 }
@@ -449,45 +471,86 @@ float fahrenheit_to_celsius(float fahrenheit) {
 }
 
 // ============================================================================
-// FAN CONTROL
+// FAN CONTROL - THREE SPEEDS (OFF / LOW / HIGH)
 // ============================================================================
 
-void set_fan_speed(uint8_t percentage) {
-  if (percentage > 100) percentage = 100;
+void set_fan_speed(FanSpeed speed) {
+  uint8_t pwm_percentage = 0;
   
-  uint8_t pwm_value = (percentage * 255) / 100;
+  switch (speed) {
+    case FAN_OFF:
+      pwm_percentage = FAN_SPEED_OFF;
+      break;
+    case FAN_LOW:
+      pwm_percentage = FAN_SPEED_LOW;
+      break;
+    case FAN_HIGH:
+      pwm_percentage = FAN_SPEED_HIGH;
+      break;
+  }
+  
+  uint8_t pwm_value = (pwm_percentage * 255) / 100;
   ledcWrite(PIN_FAN_PWM, pwm_value);
 }
 
-uint8_t calculate_fan_speed_from_temp() {
-  float temp_c = system_state.current_temp;
-  float temp_f = celsius_to_fahrenheit(temp_c);
+FanSpeed calculate_fan_speed_from_temp() {
+  float temp_f = celsius_to_fahrenheit(system_state.current_temp);
   
-  if (temp_f < 85) {
-    return 0;
-  } else if (temp_f < 95) {
-    return 25 + ((temp_f - 85) / 10) * 35;
-  } else if (temp_f < 105) {
-    return 60 + ((temp_f - 95) / 10) * 15;
-  } else if (temp_f < 115) {
-    return 75 + ((temp_f - 105) / 10) * 25;
+  // Simple three-level control:
+  // < 85°F: OFF
+  // 85-95°F: LOW
+  // > 95°F: HIGH
+  
+  if (temp_f < 85.0) {
+    return FAN_OFF;
+  } else if (temp_f < 95.0) {
+    return FAN_LOW;
   } else {
-    return 100;
+    return FAN_HIGH;
   }
 }
 
-uint8_t apply_sound_dampening(uint8_t base_speed) {
+FanSpeed apply_sound_dampening(FanSpeed base_speed) {
+  // If temperature override is active, bypass quiet mode entirely
   if (system_state.temp_override_active) {
     return base_speed;
   }
   
+  // If quiet mode disabled or no sound detected, use base speed
   if (!settings.quiet_mode_enabled || !system_state.sound_detected) {
     return base_speed;
   }
   
-  uint8_t quiet_speed = (settings.quiet_mode_sensitivity * base_speed) / 100;
-  uint8_t min_quiet_speed = 20;
-  return (quiet_speed < min_quiet_speed) ? min_quiet_speed : quiet_speed;
+  // If sound detected and quiet mode enabled, reduce speed
+  // HIGH -> LOW, LOW -> OFF (unless sensitivity is very high)
+  if (base_speed == FAN_HIGH) {
+    // Check sensitivity - if > 60%, keep at LOW instead of OFF
+    if (settings.quiet_mode_sensitivity >= 60) {
+      return FAN_LOW;
+    } else {
+      return FAN_OFF;
+    }
+  } else if (base_speed == FAN_LOW) {
+    // Only reduce to OFF if sensitivity is low (< 40%)
+    if (settings.quiet_mode_sensitivity < 40) {
+      return FAN_OFF;
+    }
+  }
+  
+  return base_speed;
+}
+
+const char* fan_speed_to_string(FanSpeed speed) {
+  switch (speed) {
+    case FAN_OFF:
+      return "OFF";
+    case FAN_LOW:
+      return "LOW";
+    case FAN_HIGH:
+      return "HIGH";
+    default:
+      return "???";
+  }
 }
 
 // ============================================================================
@@ -495,7 +558,6 @@ uint8_t apply_sound_dampening(uint8_t base_speed) {
 // ============================================================================
 
 void screen_on_event() {
-  // Called whenever there's user interaction
   menu_state.last_screen_activity = millis();
   
   if (!system_state.screen_on) {
@@ -508,7 +570,6 @@ void screen_timeout_check() {
   unsigned long inactivity = now - menu_state.last_screen_activity;
   
   if (inactivity > SCREEN_TIMEOUT && system_state.screen_on) {
-    // Turn off screen after timeout
     display_sleep();
   }
 }
@@ -528,31 +589,56 @@ void display_wake() {
 }
 
 // ============================================================================
-// USER INPUT HANDLING
+// ROTARY ENCODER HANDLING WITH DEBUGGING
 // ============================================================================
+
+void debug_encoder_state() {
+  if (!DEBUG_ENCODER) return;
+  
+  unsigned long now = millis();
+  if (now - rotary_state.last_debug_time < 500) return;  // Print every 500ms max
+  
+  int clk = digitalRead(PIN_ROTARY_CLK);
+  int dt = digitalRead(PIN_ROTARY_DT);
+  int sw = digitalRead(PIN_ROTARY_SW);
+  
+  debug_print("[ENCODER] CLK=%d DT=%d SW=%d | Value=%d\n", clk, dt, sw, rotary_state.encoder_value);
+  
+  rotary_state.last_debug_time = now;
+}
 
 void handle_rotary_encoder() {
   static unsigned long last_read_time = 0;
-  if (millis() - last_read_time < 5) return;
-  last_read_time = millis();
+  unsigned long now = millis();
+  
+  if (now - last_read_time < 5) return;
+  last_read_time = now;
   
   int current_clk = digitalRead(PIN_ROTARY_CLK);
+  int current_dt = digitalRead(PIN_ROTARY_DT);
   
+  rotary_state.current_clk_state = current_clk;
+  
+  // Detect state change on CLK pin
   if (current_clk != rotary_state.last_clk_state) {
     rotary_state.last_clk_state = current_clk;
     
+    // Read DT to determine direction
     if (current_clk == LOW) {
-      int dt_state = digitalRead(PIN_ROTARY_DT);
-      
-      if (dt_state == HIGH) {
+      if (current_dt == HIGH) {
         rotary_state.encoder_value++;
+        if (DEBUG_ENCODER) debug_print("[ENCODER] CLOCKWISE - Value: %d\n", rotary_state.encoder_value);
       } else {
         rotary_state.encoder_value--;
+        if (DEBUG_ENCODER) debug_print("[ENCODER] COUNTER-CW - Value: %d\n", rotary_state.encoder_value);
       }
       
-      screen_on_event();  // Wake screen on encoder activity
+      screen_on_event();
     }
   }
+  
+  rotary_state.last_dt_state = current_dt;
+  debug_encoder_state();
 }
 
 void handle_button_press() {
@@ -568,7 +654,8 @@ void handle_button_press() {
       last_press_time = now;
       menu_state.last_interaction = now;
       
-      screen_on_event();  // Wake screen on button press
+      debug_print("[BUTTON] Pressed\n");
+      screen_on_event();
       
       if (menu_state.current_menu == MENU_STATUS) {
         menu_state.current_menu = MENU_MAIN;
@@ -599,8 +686,6 @@ void handle_button_press() {
         settings.temp_override_enabled = !settings.temp_override_enabled;
         save_settings();
         menu_state.current_menu = MENU_MAIN;
-      } else if (menu_state.current_menu == MENU_TEMP_LIMITS) {
-        menu_state.current_menu = MENU_MAIN;
       }
     }
   } else if (button_state == HIGH) {
@@ -623,15 +708,19 @@ void handle_menu_navigation() {
     menu_state.last_encoder_value = rotary_state.encoder_value;
     menu_state.last_interaction = millis();
     
+    if (DEBUG_ENCODER) debug_print("[MENU] Delta: %d\n", encoder_delta);
+    
     if (menu_state.current_menu == MENU_MAIN) {
       menu_state.selected_option += encoder_delta;
       if (menu_state.selected_option < 0) menu_state.selected_option = 3;
       if (menu_state.selected_option > 3) menu_state.selected_option = 0;
+      debug_print("[MENU] Selected option: %d\n", menu_state.selected_option);
       
     } else if (menu_state.current_menu == MENU_QUIET_SENSITIVITY) {
       menu_state.edit_value += encoder_delta * 5;
       if (menu_state.edit_value < 0) menu_state.edit_value = 0;
       if (menu_state.edit_value > 100) menu_state.edit_value = 100;
+      debug_print("[MENU] Quiet sensitivity: %d%%\n", menu_state.edit_value);
     }
   }
 }
@@ -655,9 +744,6 @@ void update_display() {
       break;
     case MENU_QUIET_SENSITIVITY:
       draw_quiet_mode_menu();
-      break;
-    case MENU_TEMP_LIMITS:
-      draw_temp_limits_menu();
       break;
     case MENU_TEMP_OVERRIDE:
       draw_temp_override_menu();
@@ -729,22 +815,6 @@ void draw_quiet_mode_menu() {
   display.println("[Press to save]");
 }
 
-void draw_temp_limits_menu() {
-  display.println("=== Temp Limits ===");
-  display.println();
-  
-  display.print("Temp Off: ");
-  display.print(settings.temp_off_threshold);
-  display.println("C");
-  
-  display.print("Temp Max: ");
-  display.print(settings.temp_max_threshold);
-  display.println("C");
-  
-  display.println();
-  display.println("[Press to go back]");
-}
-
 void draw_temp_override_menu() {
   display.println("=== Temp Override ===");
   display.println();
@@ -754,7 +824,7 @@ void draw_temp_override_menu() {
   display.println();
   display.println("When temp > 95F:");
   display.println("- Quiet mode OFF");
-  display.println("- Fan full power");
+  display.println("- Fan to HIGH");
   
   display.println();
   display.print("Current: ");
@@ -778,8 +848,7 @@ void draw_status_screen() {
   display.println("F)");
   
   display.print("Fan: ");
-  display.print(system_state.current_fan_speed);
-  display.println("%");
+  display.println(fan_speed_to_string(system_state.current_fan_speed));
   
   display.print("Sound: ");
   display.print(system_state.current_sound_level);
@@ -809,8 +878,6 @@ void save_settings() {
   preferences.begin("fan_controller", false);
   
   preferences.putUChar("quiet_sens", settings.quiet_mode_sensitivity);
-  preferences.putUChar("temp_off", settings.temp_off_threshold);
-  preferences.putUChar("temp_max", settings.temp_max_threshold);
   preferences.putBool("quiet_en", settings.quiet_mode_enabled);
   preferences.putBool("temp_override", settings.temp_override_enabled);
   
@@ -824,8 +891,6 @@ void save_settings() {
 // ============================================================================
 
 void feed_watchdog() {
-  // Feed the watchdog to prevent auto-reset
-  // This must be called at least every 60 seconds
   esp_task_wdt_reset();
 }
 
@@ -834,7 +899,6 @@ unsigned long get_uptime_seconds() {
 }
 
 void format_uptime(unsigned long seconds, char* buffer, size_t max_len) {
-  // Format uptime as "XdYhZm" (days, hours, minutes)
   unsigned long days = seconds / 86400;
   unsigned long hours = (seconds % 86400) / 3600;
   unsigned long minutes = (seconds % 3600) / 60;
