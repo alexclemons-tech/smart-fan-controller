@@ -8,6 +8,9 @@
  * - OLED menu system for settings
  * - Rotary encoder navigation
  * - Persistent settings storage
+ * - OLED screen timeout to prevent burn-in
+ * - Watchdog timer for 24/7 reliability
+ * - Uptime tracking and display
  * 
  * Hardware:
  * - ESP32-C3 Super Mini
@@ -25,6 +28,7 @@
 #include <DallasTemperature.h>
 #include <Preferences.h>
 #include <Arduino.h>
+#include <esp_task_wdt.h>
 
 // ============================================================================
 // PIN DEFINITIONS
@@ -69,7 +73,11 @@
 
 // Menu interaction timeouts
 #define MENU_TIMEOUT        10000 // 10 seconds of inactivity returns to status
+#define SCREEN_TIMEOUT      120000 // 2 minutes of inactivity - turn off OLED
 #define ENCODER_ACCELERATION 300  // ms for acceleration threshold
+
+// Watchdog timer
+#define WATCHDOG_TIMEOUT    60    // 60 seconds - auto-reset if hung
 
 // ============================================================================
 // GLOBAL OBJECTS
@@ -107,8 +115,10 @@ struct SystemState {
   uint16_t current_sound_level;
   bool sound_detected;
   bool temp_override_active;  // Is override currently active?
+  bool screen_on;             // Is OLED display currently on?
   unsigned long last_temp_read;
   unsigned long last_sound_check;
+  unsigned long boot_time;    // Timestamp of when system started
 };
 
 SystemState system_state = {
@@ -117,8 +127,10 @@ SystemState system_state = {
   .current_sound_level = 0,
   .sound_detected = false,
   .temp_override_active = false,
+  .screen_on = true,
   .last_temp_read = 0,
-  .last_sound_check = 0
+  .last_sound_check = 0,
+  .boot_time = 0
 };
 
 // Menu system state
@@ -137,15 +149,17 @@ struct MenuState {
   uint8_t edit_value;  // Temporary value for editing
   bool in_edit_mode;
   unsigned long last_interaction;
+  unsigned long last_screen_activity;
   int last_encoder_value;
 };
 
 MenuState menu_state = {
-  .current_menu = MENU_STATUS,  // Start with status screen
+  .current_menu = MENU_STATUS,
   .selected_option = 0,
   .edit_value = 0,
   .in_edit_mode = false,
   .last_interaction = 0,
+  .last_screen_activity = 0,
   .last_encoder_value = 0
 };
 
@@ -174,6 +188,7 @@ void init_pins();
 void init_display();
 void init_sensors();
 void init_pwm();
+void init_watchdog();
 void load_settings();
 
 // Sensor reading
@@ -187,6 +202,12 @@ float fahrenheit_to_celsius(float fahrenheit);
 void set_fan_speed(uint8_t percentage);
 uint8_t calculate_fan_speed_from_temp();
 uint8_t apply_sound_dampening(uint8_t base_speed);
+
+// Display control
+void screen_on_event();
+void screen_timeout_check();
+void display_sleep();
+void display_wake();
 
 // Menu & UI
 void handle_rotary_encoder();
@@ -203,7 +224,10 @@ void draw_status_screen();
 // Settings
 void save_settings();
 
-// Utilities
+// System & Utilities
+void feed_watchdog();
+unsigned long get_uptime_seconds();
+void format_uptime(unsigned long seconds, char* buffer, size_t max_len);
 void debug_print(const char* format, ...);
 
 // ============================================================================
@@ -212,25 +236,28 @@ void debug_print(const char* format, ...);
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);  // Wait for serial to stabilize
+  delay(1000);
   
   debug_print("\n\n=== Smart Fan Controller Starting ===\n");
+  
+  system_state.boot_time = millis();
   
   init_pins();
   init_display();
   init_sensors();
   init_pwm();
+  init_watchdog();
   load_settings();
   
   menu_state.last_interaction = millis();
+  menu_state.last_screen_activity = millis();
   
-  debug_print("Setup complete!\n");
+  debug_print("Setup complete! Watchdog enabled for 24/7 reliability.\n");
 }
 
 void init_pins() {
   debug_print("Initializing pins...\n");
   
-  // Rotary encoder inputs
   pinMode(PIN_ROTARY_CLK, INPUT_PULLUP);
   pinMode(PIN_ROTARY_DT, INPUT_PULLUP);
   pinMode(PIN_ROTARY_SW, INPUT_PULLUP);
@@ -241,12 +268,11 @@ void init_pins() {
 void init_display() {
   debug_print("Initializing OLED display...\n");
   
-  // Initialize I2C on custom pins
   Wire.begin(PIN_SDA, PIN_SCL);
   
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
     debug_print("ERROR: Failed to initialize OLED!\n");
-    while (1);  // Halt if display fails
+    while (1);
   }
   
   display.setTextSize(1);
@@ -266,23 +292,30 @@ void init_display() {
 void init_sensors() {
   debug_print("Initializing sensors...\n");
   
-  // Initialize DS18B20
   tempSensor.begin();
   debug_print("DS18B20 initialized\n");
   
-  // Initialize sound sensor (just ADC)
-  analogReadResolution(10);  // 10-bit ADC (0-1023)
+  analogReadResolution(10);
   debug_print("GY-MAX9814 initialized\n");
 }
 
 void init_pwm() {
   debug_print("Initializing PWM...\n");
   
-  // Configure PWM on ESP32-C3 using new ledcAttach API
   ledcAttach(PIN_FAN_PWM, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
-  ledcWrite(PIN_FAN_PWM, 0);  // Start at 0%
+  ledcWrite(PIN_FAN_PWM, 0);
   
   debug_print("PWM configured: %d Hz, %d-bit resolution on GPIO %d\n", FAN_PWM_FREQ, FAN_PWM_RESOLUTION, PIN_FAN_PWM);
+}
+
+void init_watchdog() {
+  debug_print("Initializing watchdog timer (%d seconds)...\n", WATCHDOG_TIMEOUT);
+  
+  // Configure watchdog: 60 second timeout, panics if not fed
+  esp_task_wdt_init(WATCHDOG_TIMEOUT, true);
+  esp_task_wdt_add(NULL);  // Subscribe current task
+  
+  debug_print("Watchdog enabled. Must call feed_watchdog() every %d seconds.\n", WATCHDOG_TIMEOUT);
 }
 
 void load_settings() {
@@ -310,6 +343,9 @@ void load_settings() {
 void loop() {
   unsigned long now = millis();
   
+  // Feed watchdog regularly (prevents auto-reset)
+  feed_watchdog();
+  
   // Update temperature (every 500ms)
   if (now - system_state.last_temp_read >= 500) {
     update_temperature();
@@ -334,8 +370,13 @@ void loop() {
   handle_button_press();
   handle_menu_navigation();
   
-  // Update display
-  update_display();
+  // Check for screen timeout
+  screen_timeout_check();
+  
+  // Update display (only if screen is on)
+  if (system_state.screen_on) {
+    update_display();
+  }
   
   delay(10);
 }
@@ -357,12 +398,12 @@ void update_temperature() {
   system_state.current_temp = celsius;
   
   static unsigned long last_debug = 0;
-  if (millis() - last_debug > 2000) {
-    debug_print("Temp: %.1f°C (%.1f°F), Fan: %d%%, Override: %s\n", 
+  if (millis() - last_debug > 5000) {
+    debug_print("Temp: %.1f°C (%.1f°F), Fan: %d%%, Uptime: %ld sec\n", 
                 celsius, 
                 celsius_to_fahrenheit(celsius),
                 system_state.current_fan_speed,
-                system_state.temp_override_active ? "ACTIVE" : "inactive");
+                get_uptime_seconds());
     last_debug = millis();
   }
 }
@@ -450,6 +491,43 @@ uint8_t apply_sound_dampening(uint8_t base_speed) {
 }
 
 // ============================================================================
+// DISPLAY CONTROL - SCREEN TIMEOUT & POWER SAVING
+// ============================================================================
+
+void screen_on_event() {
+  // Called whenever there's user interaction
+  menu_state.last_screen_activity = millis();
+  
+  if (!system_state.screen_on) {
+    display_wake();
+  }
+}
+
+void screen_timeout_check() {
+  unsigned long now = millis();
+  unsigned long inactivity = now - menu_state.last_screen_activity;
+  
+  if (inactivity > SCREEN_TIMEOUT && system_state.screen_on) {
+    // Turn off screen after timeout
+    display_sleep();
+  }
+}
+
+void display_sleep() {
+  debug_print("OLED sleep - powering down screen\n");
+  display.clearDisplay();
+  display.display();
+  display.ssd1306_command(0xAE);  // Turn off display
+  system_state.screen_on = false;
+}
+
+void display_wake() {
+  debug_print("OLED wake - powering up screen\n");
+  display.ssd1306_command(0xAF);  // Turn on display
+  system_state.screen_on = true;
+}
+
+// ============================================================================
 // USER INPUT HANDLING
 // ============================================================================
 
@@ -471,6 +549,8 @@ void handle_rotary_encoder() {
       } else {
         rotary_state.encoder_value--;
       }
+      
+      screen_on_event();  // Wake screen on encoder activity
     }
   }
 }
@@ -488,13 +568,12 @@ void handle_button_press() {
       last_press_time = now;
       menu_state.last_interaction = now;
       
-      // Handle button press based on menu state
+      screen_on_event();  // Wake screen on button press
+      
       if (menu_state.current_menu == MENU_STATUS) {
-        // Enter main menu from status
         menu_state.current_menu = MENU_MAIN;
         menu_state.selected_option = 0;
       } else if (menu_state.current_menu == MENU_MAIN) {
-        // Select menu item
         switch (menu_state.selected_option) {
           case 0:
             menu_state.current_menu = MENU_SETTINGS;
@@ -511,20 +590,16 @@ void handle_button_press() {
             break;
         }
       } else if (menu_state.current_menu == MENU_SETTINGS) {
-        // Return to main menu
         menu_state.current_menu = MENU_MAIN;
       } else if (menu_state.current_menu == MENU_QUIET_SENSITIVITY) {
-        // Save and return
         settings.quiet_mode_sensitivity = menu_state.edit_value;
         save_settings();
         menu_state.current_menu = MENU_MAIN;
       } else if (menu_state.current_menu == MENU_TEMP_OVERRIDE) {
-        // Toggle temp override
         settings.temp_override_enabled = !settings.temp_override_enabled;
         save_settings();
         menu_state.current_menu = MENU_MAIN;
       } else if (menu_state.current_menu == MENU_TEMP_LIMITS) {
-        // Return to main menu
         menu_state.current_menu = MENU_MAIN;
       }
     }
@@ -534,16 +609,14 @@ void handle_button_press() {
 }
 
 void handle_menu_navigation() {
-  // Check for timeout - return to status
   if (menu_state.current_menu != MENU_STATUS) {
     if (millis() - menu_state.last_interaction > MENU_TIMEOUT) {
       menu_state.current_menu = MENU_STATUS;
-      rotary_state.encoder_value = menu_state.last_encoder_value;  // Reset encoder
+      rotary_state.encoder_value = menu_state.last_encoder_value;
       return;
     }
   }
   
-  // Process encoder movement
   int encoder_delta = rotary_state.encoder_value - menu_state.last_encoder_value;
   
   if (encoder_delta != 0) {
@@ -551,19 +624,14 @@ void handle_menu_navigation() {
     menu_state.last_interaction = millis();
     
     if (menu_state.current_menu == MENU_MAIN) {
-      // Navigate main menu (4 items)
       menu_state.selected_option += encoder_delta;
       if (menu_state.selected_option < 0) menu_state.selected_option = 3;
       if (menu_state.selected_option > 3) menu_state.selected_option = 0;
       
     } else if (menu_state.current_menu == MENU_QUIET_SENSITIVITY) {
-      // Adjust quiet mode sensitivity (0-100)
       menu_state.edit_value += encoder_delta * 5;
       if (menu_state.edit_value < 0) menu_state.edit_value = 0;
       if (menu_state.edit_value > 100) menu_state.edit_value = 100;
-      
-    } else if (menu_state.current_menu == MENU_SETTINGS) {
-      // Settings display is read-only
     }
   }
 }
@@ -722,7 +790,12 @@ void draw_status_screen() {
   display.print("Override: ");
   display.println(system_state.temp_override_active ? "ACTIVE" : "Off");
   
-  display.println();
+  // Display uptime
+  char uptime_str[32];
+  format_uptime(get_uptime_seconds(), uptime_str, sizeof(uptime_str));
+  display.print("Uptime: ");
+  display.println(uptime_str);
+  
   display.println("[Press for menu]");
 }
 
@@ -747,8 +820,27 @@ void save_settings() {
 }
 
 // ============================================================================
-// UTILITY FUNCTIONS
+// SYSTEM RELIABILITY & UTILITIES
 // ============================================================================
+
+void feed_watchdog() {
+  // Feed the watchdog to prevent auto-reset
+  // This must be called at least every 60 seconds
+  esp_task_wdt_reset();
+}
+
+unsigned long get_uptime_seconds() {
+  return (millis() - system_state.boot_time) / 1000;
+}
+
+void format_uptime(unsigned long seconds, char* buffer, size_t max_len) {
+  // Format uptime as "XdYhZm" (days, hours, minutes)
+  unsigned long days = seconds / 86400;
+  unsigned long hours = (seconds % 86400) / 3600;
+  unsigned long minutes = (seconds % 3600) / 60;
+  
+  snprintf(buffer, max_len, "%ldd%ldh%ldm", days, hours, minutes);
+}
 
 void debug_print(const char* format, ...) {
   char buffer[256];
