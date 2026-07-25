@@ -29,6 +29,7 @@
 // ============================================================================
 // PIN DEFINITIONS
 // ============================================================================
+// ESP32-C3 Super Mini has GPIO 0-10, 20, 21
 // Avoid GPIO 2 (BOOT), GPIO 8-9 (USB), GPIO 3 (onboard LED)
 
 #define PIN_ROTARY_CLK      4   // Rotary encoder clock
@@ -37,8 +38,8 @@
 #define PIN_FAN_PWM         10  // PWM output to TL-C14 fan
 #define PIN_TEMP_SENSOR     7   // DS18B20 one-wire pin
 #define PIN_SOUND_SENSOR    0   // GY-MAX9814 analog input (ADC0)
-#define PIN_SDA             19  // I2C SDA for OLED
-#define PIN_SCL             20  // I2C SCL for OLED
+#define PIN_SDA             20  // I2C SDA for OLED
+#define PIN_SCL             21  // I2C SCL for OLED
 
 // ============================================================================
 // CONFIGURATION CONSTANTS
@@ -235,6 +236,9 @@ void init_pins() {
 void init_display() {
   debug_print("Initializing OLED display...\n");
   
+  // Initialize I2C on custom pins
+  Wire.begin(PIN_SDA, PIN_SCL);
+  
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
     debug_print("ERROR: Failed to initialize OLED!\n");
     while (1);  // Halt if display fails
@@ -248,6 +252,8 @@ void init_display() {
   display.println("Controller");
   display.println("Starting...");
   display.display();
+  
+  debug_print("OLED initialized on GPIO %d (SDA), GPIO %d (SCL)\n", PIN_SDA, PIN_SCL);
   
   delay(1000);
 }
@@ -272,7 +278,7 @@ void init_pwm() {
   ledcAttach(PIN_FAN_PWM, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
   ledcWrite(PIN_FAN_PWM, 0);  // Start at 0%
   
-  debug_print("PWM configured: %d Hz, %d-bit resolution\n", FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
+  debug_print("PWM configured: %d Hz, %d-bit resolution on GPIO %d\n", FAN_PWM_FREQ, FAN_PWM_RESOLUTION, PIN_FAN_PWM);
 }
 
 void load_settings() {
