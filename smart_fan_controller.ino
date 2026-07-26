@@ -12,7 +12,6 @@
  * - OLED screen timeout to prevent burn-in
  * - Watchdog timer for 24/7 reliability
  * - Uptime tracking and display
- * - Debug menu for troubleshooting
  * 
  * Hardware:
  * - ESP32-C3 Super Mini
@@ -122,7 +121,6 @@ enum FanSpeed {
 struct SystemState {
   float current_temp;
   FanSpeed current_fan_speed;
-  FanSpeed base_fan_speed;  // Speed before sound dampening
   uint16_t current_sound_level;
   bool sound_detected;
   bool temp_override_active;
@@ -135,7 +133,6 @@ struct SystemState {
 SystemState system_state = {
   .current_temp = 0,
   .current_fan_speed = FAN_OFF,
-  .base_fan_speed = FAN_OFF,
   .current_sound_level = 0,
   .sound_detected = false,
   .temp_override_active = false,
@@ -151,13 +148,12 @@ enum MenuMode {
   MENU_SETTINGS,
   MENU_QUIET_SENSITIVITY,
   MENU_TEMP_OVERRIDE,
-  MENU_OVERRIDE_THRESHOLD,
-  MENU_DEBUG
+  MENU_OVERRIDE_THRESHOLD
 };
 
 struct MenuState {
   MenuMode current_menu;
-  uint8_t selected_option;  // 0-4 for main menu
+  uint8_t selected_option;  // 0-3 for main menu
   uint8_t edit_value;       // For sensitivity editing
   unsigned long last_interaction;
   unsigned long last_screen_activity;
@@ -282,7 +278,6 @@ void loop() {
   
   // Calculate and apply fan speed
   FanSpeed base_speed = calculate_fan_speed_from_temp();
-  system_state.base_fan_speed = base_speed;  // Store for debug
   FanSpeed final_speed = apply_sound_dampening(base_speed);
   set_fan_speed(final_speed);
   system_state.current_fan_speed = final_speed;
@@ -462,6 +457,9 @@ void screen_timeout_check() {
 
 void handle_rotary_encoder() {
   static unsigned long last_read = 0;
+  static unsigned long last_count_time = 0;
+  const int MIN_PULSE_INTERVAL = 15;  // Debounce - prevents jitter
+  
   unsigned long now = millis();
   
   if (now - last_read < 2) return;
@@ -470,7 +468,8 @@ void handle_rotary_encoder() {
   int current_clk = digitalRead(PIN_ROTARY_CLK);
   int current_dt = digitalRead(PIN_ROTARY_DT);
   
-  if (current_clk != rotary_state.last_clk) {
+  // Only count if enough time has passed (prevents bouncing)
+  if (current_clk != rotary_state.last_clk && (now - last_count_time) > MIN_PULSE_INTERVAL) {
     rotary_state.last_clk = current_clk;
     
     if (current_clk == LOW) {
@@ -481,6 +480,7 @@ void handle_rotary_encoder() {
       }
     }
     
+    last_count_time = now;
     screen_on_event();
   }
 }
@@ -520,9 +520,6 @@ void handle_button_press() {
             menu_state.current_menu = MENU_OVERRIDE_THRESHOLD;
             menu_state.edit_value = settings.override_temp_f;
             break;
-          case 4:
-            menu_state.current_menu = MENU_DEBUG;
-            break;
         }
       } else if (menu_state.current_menu == MENU_SETTINGS) {
         menu_state.current_menu = MENU_MAIN;
@@ -537,8 +534,6 @@ void handle_button_press() {
       } else if (menu_state.current_menu == MENU_OVERRIDE_THRESHOLD) {
         settings.override_temp_f = menu_state.edit_value;
         save_settings();
-        menu_state.current_menu = MENU_MAIN;
-      } else if (menu_state.current_menu == MENU_DEBUG) {
         menu_state.current_menu = MENU_MAIN;
       }
     }
@@ -564,13 +559,14 @@ void handle_menu_navigation() {
   
   if (menu_state.current_menu == MENU_MAIN) {
     menu_state.selected_option += delta;
-    if (menu_state.selected_option < 0) menu_state.selected_option = 4;
-    if (menu_state.selected_option > 4) menu_state.selected_option = 0;
+    if (menu_state.selected_option < 0) menu_state.selected_option = 3;
+    if (menu_state.selected_option > 3) menu_state.selected_option = 0;
     
   } else if (menu_state.current_menu == MENU_QUIET_SENSITIVITY) {
     menu_state.edit_value += delta * 5;
     if (menu_state.edit_value < 0) menu_state.edit_value = 0;
     if (menu_state.edit_value > 100) menu_state.edit_value = 100;
+    
   } else if (menu_state.current_menu == MENU_OVERRIDE_THRESHOLD) {
     menu_state.edit_value += delta;
     if (menu_state.edit_value < OVERRIDE_TEMP_MIN) menu_state.edit_value = OVERRIDE_TEMP_MIN;
@@ -606,9 +602,6 @@ void update_display() {
       break;
     case MENU_OVERRIDE_THRESHOLD:
       draw_override_threshold_menu();
-      break;
-    case MENU_DEBUG:
-      draw_debug_menu();
       break;
   }
   
@@ -654,11 +647,10 @@ void draw_main_menu() {
     "Settings",
     "Status",
     "Quiet Mode",
-    "Ovrd Temp",
-    "Debug"
+    "Override Temp"
   };
   
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 4; i++) {
     if (i == menu_state.selected_option) {
       display.print(">");
     } else {
@@ -671,7 +663,7 @@ void draw_main_menu() {
 void draw_settings_menu() {
   display.println("=== Settings ===");
   display.println();
-  display.print("Quiet: ");
+  display.print("Quiet Sens: ");
   display.print(settings.quiet_mode_sensitivity);
   display.println("%");
   
@@ -681,7 +673,7 @@ void draw_settings_menu() {
   display.print("TempOvrd: ");
   display.println(settings.temp_override_enabled ? "ON" : "OFF");
   
-  display.print("Threshold: ");
+  display.print("OvrdTemp: ");
   display.print(settings.override_temp_f);
   display.println("F");
   
@@ -721,9 +713,6 @@ void draw_temp_override_menu() {
   display.print(settings.override_temp_f);
   display.println("F");
   
-  display.println("- Quiet mode OFF");
-  display.println("- Fan to HIGH");
-  
   display.println();
   display.print("Current: ");
   if (system_state.temp_override_active) {
@@ -743,63 +732,18 @@ void draw_override_threshold_menu() {
   display.println("F");
   
   display.println("(Knob to adjust)");
+  display.println("Range: 100-120F");
   display.println();
   
-  // Show range and current position
-  display.print("Range: ");
-  display.print(OVERRIDE_TEMP_MIN);
-  display.print("-");
-  display.print(OVERRIDE_TEMP_MAX);
-  display.println("F");
-  
-  // Simple bar indicator
-  uint8_t bar_pos = ((menu_state.edit_value - OVERRIDE_TEMP_MIN) * 20) / (OVERRIDE_TEMP_MAX - OVERRIDE_TEMP_MIN);
+  uint8_t bar_length = ((menu_state.edit_value - OVERRIDE_TEMP_MIN) / 2);
   display.print("[");
-  for (int i = 0; i < 20; i++) {
-    display.print(i == bar_pos ? "*" : "-");
+  for (int i = 0; i < 10; i++) {
+    display.print(i < bar_length ? "*" : "-");
   }
   display.println("]");
   
   display.println();
   display.println("[Press to save]");
-}
-
-void draw_debug_menu() {
-  display.println("=== Debug Info ===");
-  display.println();
-  
-  // Sound level info
-  display.print("Sound: ");
-  display.print(system_state.current_sound_level);
-  display.print(" [");
-  display.print(system_state.sound_detected ? "ON" : "OFF");
-  display.println("]");
-  
-  // Base vs Final fan speed
-  display.print("Base: ");
-  display.print(fan_speed_to_string(system_state.base_fan_speed));
-  display.print(" -> ");
-  display.println(fan_speed_to_string(system_state.current_fan_speed));
-  
-  // Dampening reason
-  if (system_state.temp_override_active) {
-    display.println("Override ACTIVE!");
-  } else if (settings.quiet_mode_enabled && system_state.sound_detected) {
-    display.println("Sound dampening ON");
-  } else if (settings.quiet_mode_enabled) {
-    display.println("No sound detected");
-  } else {
-    display.println("Quiet mode OFF");
-  }
-  
-  display.println();
-  display.print("Thresh: ");
-  display.print(SOUND_THRESHOLD);
-  display.print(" Sens: ");
-  display.print(settings.quiet_mode_sensitivity);
-  display.println("%");
-  
-  display.println("[Press to go back]");
 }
 
 // ============================================================================
