@@ -1,5 +1,5 @@
 /*
- * ENCODER TEST with DEBOUNCING
+ * ENCODER TEST with AGGRESSIVE DEBOUNCING
  */
 
 #include <Wire.h>
@@ -19,7 +19,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 int encoder_count = 0;
 int last_clk = 1;
-unsigned long last_clk_time = 0;
+unsigned long last_change_time = 0;
+const int DEBOUNCE_DELAY = 10;  // 10ms debounce
 
 void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -37,7 +38,7 @@ void setup() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("ENCODER TEST");
-  display.println("With DEBOUNCING");
+  display.println("Aggressive Debounce");
   display.println("Rotate knob...");
   display.display();
   
@@ -49,14 +50,19 @@ void loop() {
   int current_dt = digitalRead(PIN_ROTARY_DT);
   int current_sw = digitalRead(PIN_ROTARY_SW);
   
-  // DEBOUNCE: Only check if 5ms has passed since last change
+  // Only check if debounce time has passed
   unsigned long now = millis();
-  if (current_clk != last_clk && (now - last_clk_time) > 5) {
-    last_clk_time = now;
+  if (current_clk != last_clk && (now - last_change_time) > DEBOUNCE_DELAY) {
+    last_change_time = now;
     last_clk = current_clk;
     
+    // Only count on falling edge (HIGH to LOW)
     if (current_clk == LOW) {
-      if (current_dt == HIGH) {
+      // Read DT again after debounce to be sure
+      delay(2);
+      int dt_stable = digitalRead(PIN_ROTARY_DT);
+      
+      if (dt_stable == HIGH) {
         encoder_count++;
       } else {
         encoder_count--;
@@ -69,7 +75,7 @@ void loop() {
   display.setCursor(0, 0);
   
   display.println("ENCODER TEST");
-  display.println("(Debounced 5ms)");
+  display.println("(10ms debounce)");
   display.println();
   
   display.print("CLK: ");
@@ -82,13 +88,15 @@ void loop() {
   display.println(current_sw ? "HIGH" : "LOW");
   
   display.println();
+  display.setTextSize(2);
   display.print("Count: ");
   display.println(encoder_count);
   
+  display.setTextSize(1);
   display.println();
-  display.println("Rotate smoothly");
-  display.println("for clean counts");
+  display.println("Rotate SLOWLY");
+  display.println("and SMOOTHLY");
   
   display.display();
-  delay(10);
+  delay(20);
 }
