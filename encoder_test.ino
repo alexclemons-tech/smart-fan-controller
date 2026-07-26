@@ -1,5 +1,5 @@
 /*
- * ENCODER TEST - Minimum Pulse Width Filter
+ * ENCODER TEST - State Machine Decoder
  */
 
 #include <Wire.h>
@@ -19,8 +19,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 int encoder_count = 0;
 int last_clk = 1;
-unsigned long last_count_time = 0;
-const int MIN_PULSE_INTERVAL = 15;  // Minimum time between counts (ms)
+int last_dt = 1;
+unsigned long last_change_time = 0;
+const int DEBOUNCE_DELAY = 5;
 
 void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -38,7 +39,7 @@ void setup() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("ENCODER TEST");
-  display.println("Pulse Width Filter");
+  display.println("State Machine");
   display.println("Rotate knob...");
   display.display();
   
@@ -52,22 +53,41 @@ void loop() {
   
   unsigned long now = millis();
   
-  // Only count if enough time has passed since last count
-  if (current_clk != last_clk && (now - last_count_time) > MIN_PULSE_INTERVAL) {
-    last_clk = current_clk;
+  // Detect change on CLK
+  if (current_clk != last_clk && (now - last_change_time) > DEBOUNCE_DELAY) {
+    last_change_time = now;
     
+    // CLK changed - check DT state
     if (current_clk == LOW) {
-      delay(1);
-      int dt_stable = digitalRead(PIN_ROTARY_DT);
+      // CLK went LOW - read DT now
+      delay(2);
+      current_dt = digitalRead(PIN_ROTARY_DT);
       
-      if (dt_stable == HIGH) {
+      if (current_dt == HIGH) {
+        // CLK LOW, DT HIGH = UP
         encoder_count++;
       } else {
+        // CLK LOW, DT LOW = DOWN
         encoder_count--;
       }
-      
-      last_count_time = now;
     }
+    
+    last_clk = current_clk;
+  }
+  
+  // Also check if DT changed (catches DOWN direction better)
+  if (current_dt != last_dt && (now - last_change_time) > DEBOUNCE_DELAY) {
+    last_change_time = now;
+    
+    // DT changed - check CLK state
+    if (current_dt == LOW && last_clk == LOW) {
+      // Both LOW = DOWN direction
+      if (encoder_count > 0) {  // Only count if we haven't gone negative
+        encoder_count--;
+      }
+    }
+    
+    last_dt = current_dt;
   }
   
   display.clearDisplay();
@@ -75,7 +95,7 @@ void loop() {
   display.setCursor(0, 0);
   
   display.println("ENCODER TEST");
-  display.println("(15ms Min Pulse)");
+  display.println("(State Machine)");
   display.println();
   
   display.print("CLK: ");
@@ -94,7 +114,7 @@ void loop() {
   
   display.setTextSize(1);
   display.println();
-  display.println("Should be smooth");
+  display.println("UP and DOWN");
   display.println("both directions");
   
   display.display();
