@@ -4,9 +4,10 @@
  * Features:
  * - Temperature-based fan control (OFF / LOW / HIGH)
  * - Sound-reactive mode (reduces fan during speech)
- * - Temperature override safety (disables quiet mode if temp > 95°F)
+ * - Temperature override safety (disables quiet mode if temp > threshold)
+ * - Adjustable override temperature threshold (100-120°F)
  * - OLED menu system for settings
- * - Rotary encoder navigation with improved debouncing
+ * - Rotary encoder navigation
  * - Persistent settings storage
  * - OLED screen timeout to prevent burn-in
  * - Watchdog timer for 24/7 reliability
@@ -51,7 +52,6 @@
 #define TEMP_OFF            29   // 85°F - fan OFF below this
 #define TEMP_LOW            32   // 90°F - fan LOW from 85-90°F
 #define TEMP_HIGH           35   // 95°F - fan HIGH above 95°F
-#define TEMP_OVERRIDE       35   // 95°F - disable quiet mode above this
 
 // Fan speed levels (PWM percentages)
 #define FAN_SPEED_OFF       0    // 0%
@@ -80,8 +80,10 @@
 // Watchdog timer
 #define WATCHDOG_TIMEOUT    60    // 60 seconds - auto-reset if hung
 
-// Encoder debounce
-#define ENCODER_DEBOUNCE_MS 20    // Debounce time in milliseconds
+// Override temperature range (Fahrenheit)
+#define OVERRIDE_TEMP_MIN   100   // 100°F minimum
+#define OVERRIDE_TEMP_MAX   120   // 120°F maximum
+#define OVERRIDE_TEMP_DEFAULT 95  // 95°F default
 
 // ============================================================================
 // GLOBAL OBJECTS
@@ -100,12 +102,14 @@ struct Settings {
   uint8_t quiet_mode_sensitivity;
   bool quiet_mode_enabled;
   bool temp_override_enabled;
+  uint8_t override_temp_f;  // Override temperature threshold in Fahrenheit
 };
 
 Settings settings = {
   .quiet_mode_sensitivity = 50,
   .quiet_mode_enabled = true,
-  .temp_override_enabled = true
+  .temp_override_enabled = true,
+  .override_temp_f = OVERRIDE_TEMP_DEFAULT
 };
 
 enum FanSpeed {
@@ -143,7 +147,8 @@ enum MenuMode {
   MENU_MAIN,
   MENU_SETTINGS,
   MENU_QUIET_SENSITIVITY,
-  MENU_TEMP_OVERRIDE
+  MENU_TEMP_OVERRIDE,
+  MENU_OVERRIDE_THRESHOLD
 };
 
 struct MenuState {
@@ -165,13 +170,11 @@ MenuState menu_state = {
 struct RotaryState {
   int last_clk;
   int encoder_delta;  // Track changes since last menu update
-  unsigned long last_pulse_time;  // Debounce timer
 };
 
 RotaryState rotary_state = {
   .last_clk = 1,
-  .encoder_delta = 0,
-  .last_pulse_time = 0
+  .encoder_delta = 0
 };
 
 // ============================================================================
@@ -241,6 +244,12 @@ void load_settings() {
   settings.quiet_mode_sensitivity = preferences.getUChar("quiet_sens", 50);
   settings.quiet_mode_enabled = preferences.getBool("quiet_en", true);
   settings.temp_override_enabled = preferences.getBool("temp_override", true);
+  settings.override_temp_f = preferences.getUChar("override_temp", OVERRIDE_TEMP_DEFAULT);
+  
+  // Validate override temp is within range
+  if (settings.override_temp_f < OVERRIDE_TEMP_MIN || settings.override_temp_f > OVERRIDE_TEMP_MAX) {
+    settings.override_temp_f = OVERRIDE_TEMP_DEFAULT;
+  }
   
   preferences.end();
 }
@@ -309,9 +318,9 @@ void update_override_status() {
   float temp_f = celsius_to_fahrenheit(system_state.current_temp);
   
   if (settings.temp_override_enabled) {
-    if (temp_f > 95.0) {
+    if (temp_f > settings.override_temp_f) {
       system_state.temp_override_active = true;
-    } else if (temp_f < 93.0) {
+    } else if (temp_f < (settings.override_temp_f - 2.0)) {
       system_state.temp_override_active = false;
     }
   } else {
@@ -443,7 +452,7 @@ void screen_timeout_check() {
 }
 
 // ============================================================================
-// ROTARY ENCODER HANDLING - IMPROVED DEBOUNCING
+// ROTARY ENCODER HANDLING
 // ============================================================================
 
 void handle_rotary_encoder() {
@@ -457,21 +466,17 @@ void handle_rotary_encoder() {
   int current_dt = digitalRead(PIN_ROTARY_DT);
   
   if (current_clk != rotary_state.last_clk) {
-    // Debounce: only count if enough time has passed since last pulse
-    if ((now - rotary_state.last_pulse_time) > ENCODER_DEBOUNCE_MS) {
-      rotary_state.last_clk = current_clk;
-      
-      if (current_clk == LOW) {
-        if (current_dt == HIGH) {
-          rotary_state.encoder_delta++;
-        } else {
-          rotary_state.encoder_delta--;
-        }
+    rotary_state.last_clk = current_clk;
+    
+    if (current_clk == LOW) {
+      if (current_dt == HIGH) {
+        rotary_state.encoder_delta++;
+      } else {
+        rotary_state.encoder_delta--;
       }
-      
-      rotary_state.last_pulse_time = now;
-      screen_on_event();
     }
+    
+    screen_on_event();
   }
 }
 
@@ -507,7 +512,8 @@ void handle_button_press() {
             menu_state.edit_value = settings.quiet_mode_sensitivity;
             break;
           case 3:
-            menu_state.current_menu = MENU_TEMP_OVERRIDE;
+            menu_state.current_menu = MENU_OVERRIDE_THRESHOLD;
+            menu_state.edit_value = settings.override_temp_f;
             break;
         }
       } else if (menu_state.current_menu == MENU_SETTINGS) {
@@ -518,6 +524,10 @@ void handle_button_press() {
         menu_state.current_menu = MENU_MAIN;
       } else if (menu_state.current_menu == MENU_TEMP_OVERRIDE) {
         settings.temp_override_enabled = !settings.temp_override_enabled;
+        save_settings();
+        menu_state.current_menu = MENU_MAIN;
+      } else if (menu_state.current_menu == MENU_OVERRIDE_THRESHOLD) {
+        settings.override_temp_f = menu_state.edit_value;
         save_settings();
         menu_state.current_menu = MENU_MAIN;
       }
@@ -551,6 +561,10 @@ void handle_menu_navigation() {
     menu_state.edit_value += delta * 5;
     if (menu_state.edit_value < 0) menu_state.edit_value = 0;
     if (menu_state.edit_value > 100) menu_state.edit_value = 100;
+  } else if (menu_state.current_menu == MENU_OVERRIDE_THRESHOLD) {
+    menu_state.edit_value += delta;
+    if (menu_state.edit_value < OVERRIDE_TEMP_MIN) menu_state.edit_value = OVERRIDE_TEMP_MIN;
+    if (menu_state.edit_value > OVERRIDE_TEMP_MAX) menu_state.edit_value = OVERRIDE_TEMP_MAX;
   }
 }
 
@@ -579,6 +593,9 @@ void update_display() {
       break;
     case MENU_TEMP_OVERRIDE:
       draw_temp_override_menu();
+      break;
+    case MENU_OVERRIDE_THRESHOLD:
+      draw_override_threshold_menu();
       break;
   }
   
@@ -624,7 +641,7 @@ void draw_main_menu() {
     "Settings",
     "Status",
     "Quiet Mode",
-    "Temp Override"
+    "Ovrd Temp"
   };
   
   for (int i = 0; i < 4; i++) {
@@ -649,6 +666,10 @@ void draw_settings_menu() {
   
   display.print("TempOvrd: ");
   display.println(settings.temp_override_enabled ? "ON" : "OFF");
+  
+  display.print("Threshold: ");
+  display.print(settings.override_temp_f);
+  display.println("F");
   
   display.println();
   display.println("[Press to go back]");
@@ -682,7 +703,10 @@ void draw_temp_override_menu() {
   display.println(settings.temp_override_enabled ? "ON" : "OFF");
   
   display.println();
-  display.println("When temp > 95F:");
+  display.print("Threshold: ");
+  display.print(settings.override_temp_f);
+  display.println("F");
+  
   display.println("- Quiet mode OFF");
   display.println("- Fan to HIGH");
   
@@ -697,6 +721,35 @@ void draw_temp_override_menu() {
   display.println("[Press to toggle]");
 }
 
+void draw_override_threshold_menu() {
+  display.println("=== Override Temp ===");
+  display.println();
+  display.print("Threshold: ");
+  display.print(menu_state.edit_value);
+  display.println("F");
+  
+  display.println("(Knob to adjust)");
+  display.println();
+  
+  // Show range and current position
+  display.print("Range: ");
+  display.print(OVERRIDE_TEMP_MIN);
+  display.print("-");
+  display.print(OVERRIDE_TEMP_MAX);
+  display.println("F");
+  
+  // Simple bar indicator
+  uint8_t bar_pos = ((menu_state.edit_value - OVERRIDE_TEMP_MIN) * 20) / (OVERRIDE_TEMP_MAX - OVERRIDE_TEMP_MIN);
+  display.print("[");
+  for (int i = 0; i < 20; i++) {
+    display.print(i == bar_pos ? "*" : "-");
+  }
+  display.println("]");
+  
+  display.println();
+  display.println("[Press to save]");
+}
+
 // ============================================================================
 // SETTINGS
 // ============================================================================
@@ -707,6 +760,7 @@ void save_settings() {
   preferences.putUChar("quiet_sens", settings.quiet_mode_sensitivity);
   preferences.putBool("quiet_en", settings.quiet_mode_enabled);
   preferences.putBool("temp_override", settings.temp_override_enabled);
+  preferences.putUChar("override_temp", settings.override_temp_f);
   
   preferences.end();
 }
