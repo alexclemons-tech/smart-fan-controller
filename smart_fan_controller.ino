@@ -3,8 +3,8 @@
  * 
  * Features:
  * - Temperature-based fan control (OFF / LOW / HIGH)
- * - Sound-reactive mode (reduces fan during speech)
- * - Temperature override safety (disables quiet mode if temp > threshold)
+ * - Sound-reactive mode (turns fan OFF during speech)
+ * - Temperature override safety (forces fan HIGH if temp > threshold)
  * - Adjustable override temperature threshold (100-120°F)
  * - OLED menu system for settings
  * - Rotary encoder navigation
@@ -390,26 +390,17 @@ FanSpeed calculate_fan_speed_from_temp() {
 }
 
 FanSpeed apply_sound_dampening(FanSpeed base_speed) {
+  // Safety override: if temp is too high, ignore sound and run fan HIGH
   if (system_state.temp_override_active) {
-    return base_speed;
+    return FAN_HIGH;
   }
   
-  if (!settings.quiet_mode_enabled || !system_state.sound_detected) {
-    return base_speed;
+  // If sound detected and quiet mode is enabled, turn fan OFF
+  if (settings.quiet_mode_enabled && system_state.sound_detected) {
+    return FAN_OFF;
   }
   
-  if (base_speed == FAN_HIGH) {
-    if (settings.quiet_mode_sensitivity >= 60) {
-      return FAN_LOW;
-    } else {
-      return FAN_OFF;
-    }
-  } else if (base_speed == FAN_LOW) {
-    if (settings.quiet_mode_sensitivity < 40) {
-      return FAN_OFF;
-    }
-  }
-  
+  // Otherwise, use the temperature-based fan speed
   return base_speed;
 }
 
@@ -458,7 +449,7 @@ void screen_timeout_check() {
 void handle_rotary_encoder() {
   static unsigned long last_read = 0;
   static unsigned long last_count_time = 0;
-  const int MIN_PULSE_INTERVAL = 15;  // Debounce - prevents jitter
+  const int MIN_PULSE_INTERVAL = 30;  // Debounce - prevents jitter
   
   unsigned long now = millis();
   
