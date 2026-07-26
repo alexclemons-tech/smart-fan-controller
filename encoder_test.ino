@@ -1,12 +1,12 @@
 /*
- * ENCODER TEST - SWAPPED CLK/DT to fix direction
+ * ENCODER TEST - Minimum Pulse Width Filter
  */
 
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 
-#define PIN_ROTARY_CLK      5   // SWAPPED - was 4
-#define PIN_ROTARY_DT       4   // SWAPPED - was 5
+#define PIN_ROTARY_CLK      5
+#define PIN_ROTARY_DT       4
 #define PIN_ROTARY_SW       6
 #define PIN_SDA             20
 #define PIN_SCL             21
@@ -19,8 +19,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 int encoder_count = 0;
 int last_clk = 1;
-unsigned long last_change_time = 0;
-const int DEBOUNCE_DELAY = 10;
+unsigned long last_count_time = 0;
+const int MIN_PULSE_INTERVAL = 15;  // Minimum time between counts (ms)
 
 void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -38,7 +38,7 @@ void setup() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("ENCODER TEST");
-  display.println("CLK/DT SWAPPED");
+  display.println("Pulse Width Filter");
   display.println("Rotate knob...");
   display.display();
   
@@ -51,12 +51,13 @@ void loop() {
   int current_sw = digitalRead(PIN_ROTARY_SW);
   
   unsigned long now = millis();
-  if (current_clk != last_clk && (now - last_change_time) > DEBOUNCE_DELAY) {
-    last_change_time = now;
+  
+  // Only count if enough time has passed since last count
+  if (current_clk != last_clk && (now - last_count_time) > MIN_PULSE_INTERVAL) {
     last_clk = current_clk;
     
     if (current_clk == LOW) {
-      delay(2);
+      delay(1);
       int dt_stable = digitalRead(PIN_ROTARY_DT);
       
       if (dt_stable == HIGH) {
@@ -64,6 +65,8 @@ void loop() {
       } else {
         encoder_count--;
       }
+      
+      last_count_time = now;
     }
   }
   
@@ -72,7 +75,7 @@ void loop() {
   display.setCursor(0, 0);
   
   display.println("ENCODER TEST");
-  display.println("(CLK/DT Swapped)");
+  display.println("(15ms Min Pulse)");
   display.println();
   
   display.print("CLK: ");
@@ -91,9 +94,9 @@ void loop() {
   
   display.setTextSize(1);
   display.println();
-  display.println("UP and DOWN");
-  display.println("should work now!");
+  display.println("Should be smooth");
+  display.println("both directions");
   
   display.display();
-  delay(20);
+  delay(10);
 }
