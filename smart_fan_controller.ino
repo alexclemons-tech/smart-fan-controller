@@ -12,6 +12,7 @@
  * - OLED screen timeout to prevent burn-in
  * - Watchdog timer for 24/7 reliability
  * - Uptime tracking and display
+ * - Debug menu for troubleshooting
  * 
  * Hardware:
  * - ESP32-C3 Super Mini
@@ -121,6 +122,7 @@ enum FanSpeed {
 struct SystemState {
   float current_temp;
   FanSpeed current_fan_speed;
+  FanSpeed base_fan_speed;  // Speed before sound dampening
   uint16_t current_sound_level;
   bool sound_detected;
   bool temp_override_active;
@@ -133,6 +135,7 @@ struct SystemState {
 SystemState system_state = {
   .current_temp = 0,
   .current_fan_speed = FAN_OFF,
+  .base_fan_speed = FAN_OFF,
   .current_sound_level = 0,
   .sound_detected = false,
   .temp_override_active = false,
@@ -148,12 +151,13 @@ enum MenuMode {
   MENU_SETTINGS,
   MENU_QUIET_SENSITIVITY,
   MENU_TEMP_OVERRIDE,
-  MENU_OVERRIDE_THRESHOLD
+  MENU_OVERRIDE_THRESHOLD,
+  MENU_DEBUG
 };
 
 struct MenuState {
   MenuMode current_menu;
-  uint8_t selected_option;  // 0-3 for main menu
+  uint8_t selected_option;  // 0-4 for main menu
   uint8_t edit_value;       // For sensitivity editing
   unsigned long last_interaction;
   unsigned long last_screen_activity;
@@ -278,6 +282,7 @@ void loop() {
   
   // Calculate and apply fan speed
   FanSpeed base_speed = calculate_fan_speed_from_temp();
+  system_state.base_fan_speed = base_speed;  // Store for debug
   FanSpeed final_speed = apply_sound_dampening(base_speed);
   set_fan_speed(final_speed);
   system_state.current_fan_speed = final_speed;
@@ -515,6 +520,9 @@ void handle_button_press() {
             menu_state.current_menu = MENU_OVERRIDE_THRESHOLD;
             menu_state.edit_value = settings.override_temp_f;
             break;
+          case 4:
+            menu_state.current_menu = MENU_DEBUG;
+            break;
         }
       } else if (menu_state.current_menu == MENU_SETTINGS) {
         menu_state.current_menu = MENU_MAIN;
@@ -529,6 +537,8 @@ void handle_button_press() {
       } else if (menu_state.current_menu == MENU_OVERRIDE_THRESHOLD) {
         settings.override_temp_f = menu_state.edit_value;
         save_settings();
+        menu_state.current_menu = MENU_MAIN;
+      } else if (menu_state.current_menu == MENU_DEBUG) {
         menu_state.current_menu = MENU_MAIN;
       }
     }
@@ -554,8 +564,8 @@ void handle_menu_navigation() {
   
   if (menu_state.current_menu == MENU_MAIN) {
     menu_state.selected_option += delta;
-    if (menu_state.selected_option < 0) menu_state.selected_option = 3;
-    if (menu_state.selected_option > 3) menu_state.selected_option = 0;
+    if (menu_state.selected_option < 0) menu_state.selected_option = 4;
+    if (menu_state.selected_option > 4) menu_state.selected_option = 0;
     
   } else if (menu_state.current_menu == MENU_QUIET_SENSITIVITY) {
     menu_state.edit_value += delta * 5;
@@ -596,6 +606,9 @@ void update_display() {
       break;
     case MENU_OVERRIDE_THRESHOLD:
       draw_override_threshold_menu();
+      break;
+    case MENU_DEBUG:
+      draw_debug_menu();
       break;
   }
   
@@ -641,10 +654,11 @@ void draw_main_menu() {
     "Settings",
     "Status",
     "Quiet Mode",
-    "Ovrd Temp"
+    "Ovrd Temp",
+    "Debug"
   };
   
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     if (i == menu_state.selected_option) {
       display.print(">");
     } else {
@@ -748,6 +762,44 @@ void draw_override_threshold_menu() {
   
   display.println();
   display.println("[Press to save]");
+}
+
+void draw_debug_menu() {
+  display.println("=== Debug Info ===");
+  display.println();
+  
+  // Sound level info
+  display.print("Sound: ");
+  display.print(system_state.current_sound_level);
+  display.print(" [");
+  display.print(system_state.sound_detected ? "ON" : "OFF");
+  display.println("]");
+  
+  // Base vs Final fan speed
+  display.print("Base: ");
+  display.print(fan_speed_to_string(system_state.base_fan_speed));
+  display.print(" -> ");
+  display.println(fan_speed_to_string(system_state.current_fan_speed));
+  
+  // Dampening reason
+  if (system_state.temp_override_active) {
+    display.println("Override ACTIVE!");
+  } else if (settings.quiet_mode_enabled && system_state.sound_detected) {
+    display.println("Sound dampening ON");
+  } else if (settings.quiet_mode_enabled) {
+    display.println("No sound detected");
+  } else {
+    display.println("Quiet mode OFF");
+  }
+  
+  display.println();
+  display.print("Thresh: ");
+  display.print(SOUND_THRESHOLD);
+  display.print(" Sens: ");
+  display.print(settings.quiet_mode_sensitivity);
+  display.println("%");
+  
+  display.println("[Press to go back]");
 }
 
 // ============================================================================
