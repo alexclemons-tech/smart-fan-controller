@@ -1,5 +1,5 @@
 /*
- * ENCODER TEST - Check if rotary encoder is being read
+ * ENCODER TEST with DEBOUNCING
  */
 
 #include <Wire.h>
@@ -19,6 +19,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 int encoder_count = 0;
 int last_clk = 1;
+unsigned long last_clk_time = 0;
 
 void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -36,6 +37,7 @@ void setup() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("ENCODER TEST");
+  display.println("With DEBOUNCING");
   display.println("Rotate knob...");
   display.display();
   
@@ -47,7 +49,10 @@ void loop() {
   int current_dt = digitalRead(PIN_ROTARY_DT);
   int current_sw = digitalRead(PIN_ROTARY_SW);
   
-  if (current_clk != last_clk) {
+  // DEBOUNCE: Only check if 5ms has passed since last change
+  unsigned long now = millis();
+  if (current_clk != last_clk && (now - last_clk_time) > 5) {
+    last_clk_time = now;
     last_clk = current_clk;
     
     if (current_clk == LOW) {
@@ -64,6 +69,7 @@ void loop() {
   display.setCursor(0, 0);
   
   display.println("ENCODER TEST");
+  display.println("(Debounced 5ms)");
   display.println();
   
   display.print("CLK: ");
@@ -80,9 +86,9 @@ void loop() {
   display.println(encoder_count);
   
   display.println();
-  display.println("Rotate to change");
-  display.println("Press button to test");
+  display.println("Rotate smoothly");
+  display.println("for clean counts");
   
   display.display();
-  delay(50);
+  delay(10);
 }
