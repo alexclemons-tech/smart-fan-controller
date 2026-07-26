@@ -1,12 +1,12 @@
 /*
- * ENCODER TEST with AGGRESSIVE DEBOUNCING
+ * ENCODER TEST - SWAPPED CLK/DT to fix direction
  */
 
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 
-#define PIN_ROTARY_CLK      4
-#define PIN_ROTARY_DT       5
+#define PIN_ROTARY_CLK      5   // SWAPPED - was 4
+#define PIN_ROTARY_DT       4   // SWAPPED - was 5
 #define PIN_ROTARY_SW       6
 #define PIN_SDA             20
 #define PIN_SCL             21
@@ -20,7 +20,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 int encoder_count = 0;
 int last_clk = 1;
 unsigned long last_change_time = 0;
-const int DEBOUNCE_DELAY = 10;  // 10ms debounce
+const int DEBOUNCE_DELAY = 10;
 
 void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -38,7 +38,7 @@ void setup() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("ENCODER TEST");
-  display.println("Aggressive Debounce");
+  display.println("CLK/DT SWAPPED");
   display.println("Rotate knob...");
   display.display();
   
@@ -50,15 +50,12 @@ void loop() {
   int current_dt = digitalRead(PIN_ROTARY_DT);
   int current_sw = digitalRead(PIN_ROTARY_SW);
   
-  // Only check if debounce time has passed
   unsigned long now = millis();
   if (current_clk != last_clk && (now - last_change_time) > DEBOUNCE_DELAY) {
     last_change_time = now;
     last_clk = current_clk;
     
-    // Only count on falling edge (HIGH to LOW)
     if (current_clk == LOW) {
-      // Read DT again after debounce to be sure
       delay(2);
       int dt_stable = digitalRead(PIN_ROTARY_DT);
       
@@ -75,7 +72,7 @@ void loop() {
   display.setCursor(0, 0);
   
   display.println("ENCODER TEST");
-  display.println("(10ms debounce)");
+  display.println("(CLK/DT Swapped)");
   display.println();
   
   display.print("CLK: ");
@@ -94,8 +91,8 @@ void loop() {
   
   display.setTextSize(1);
   display.println();
-  display.println("Rotate SLOWLY");
-  display.println("and SMOOTHLY");
+  display.println("UP and DOWN");
+  display.println("should work now!");
   
   display.display();
   delay(20);
