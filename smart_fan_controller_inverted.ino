@@ -67,7 +67,7 @@
 #define FAN_PWM_RESOLUTION  8      // 8-bit (0-255)
 
 // Set true for inverted-driver hardware (2N2222 + IRF540N gate drive)
-#define FAN_DRIVER_INVERTED true
+#define FAN_DRIVER_INVERTED false
 
 // Sound sensor tuning
 #define SOUND_THRESHOLD     100   // ADC threshold for speech detection
